@@ -27,7 +27,6 @@ test('globalcloud exports complete YAML without decrypt block', async ({ page })
       '  - https://ossconfig.gcvipaff.cc/oss/ConFigOss.json',
       '  - https://download.guangsap1.com/qqy/ConFigOss.json',
       '  - https://down-apps.oss-cn-hongkong.aliyuncs.com/qqy/ConFigOss.json',
-      '',
       'username:',
       'password:',
       'headers:',

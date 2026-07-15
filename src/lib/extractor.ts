@@ -434,7 +434,6 @@ function yamlScalar(value: string): string {
 export function renderYaml(info: ExtractedInfo): string {
   const lines = ['cfgUrls:']
   for (const url of info.cfgUrls) lines.push(`  - ${yamlScalar(url)}`)
-  lines.push('')
   lines.push('username:')
   lines.push('password:')
   lines.push('headers:')
