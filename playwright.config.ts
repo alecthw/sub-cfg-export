@@ -10,14 +10,14 @@ export default defineConfig({
   workers: 1,
   reporter: 'line',
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: 'http://127.0.0.1:43217',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'npm run preview -- --host 127.0.0.1 --port 4173',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: true,
+    command: 'npm run preview -- --host 127.0.0.1 --port 43217',
+    url: 'http://127.0.0.1:43217',
+    reuseExistingServer: false,
     timeout: 120_000,
   },
   projects: [

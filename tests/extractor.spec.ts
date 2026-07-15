@@ -94,6 +94,12 @@ test('removes legacy COI worker without reloading the page', async ({ page }) =>
 test('hero exposes GitHub and Sub-Store project links', async ({ page }) => {
   await openApp(page)
 
+  await expect(page).toHaveTitle('封端机场导出Sub-Store订阅')
+  await expect(
+    page.getByRole('heading', { level: 1, name: '封端机场导出Sub-Store订阅' }),
+  ).toBeVisible()
+  await expect(page.getByText('说明：从机场/梯子控制台下载')).toBeVisible()
+
   const projectLink = page.getByRole('link', { name: '打开 sub cfg export GitHub 项目主页' })
   await expect(projectLink).toHaveAttribute('href', 'https://github.com/alecthw/sub-cfg-export')
   await expect(projectLink).toHaveAttribute('target', '_blank')

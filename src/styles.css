@@ -84,7 +84,7 @@ textarea {
 .hero-content {
   position: relative;
   z-index: 2;
-  max-width: 760px;
+  max-width: 940px;
   padding: 58px 64px;
 }
 
@@ -135,11 +135,13 @@ textarea {
 }
 
 .hero h1.ant-typography {
+  max-width: 900px;
   margin: 0;
   color: #fff;
-  font-size: clamp(42px, 7vw, 72px);
-  line-height: 0.98;
-  letter-spacing: -0.055em;
+  font-size: clamp(40px, 5.2vw, 62px);
+  line-height: 1.08;
+  letter-spacing: -0.045em;
+  text-wrap: balance;
 }
 
 .hero-description.ant-typography {
@@ -200,6 +202,33 @@ textarea {
 
 .upload-card .ant-card-body {
   padding: 30px;
+}
+
+.upload-heading {
+  max-width: 760px;
+}
+
+.upload-heading h3.ant-typography {
+  margin-bottom: 12px;
+}
+
+.installer-source-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  color: #58647a;
+  border: 1px solid #e4e9f4;
+  border-radius: 10px;
+  background: #f7f9fd;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.installer-source-note > .anticon {
+  margin-top: 4px;
+  color: #2357d9;
 }
 
 .privacy-card {
@@ -409,7 +438,7 @@ footer {
   }
 
   .hero h1.ant-typography {
-    font-size: 46px;
+    font-size: 38px;
   }
 
   .hero-description.ant-typography {

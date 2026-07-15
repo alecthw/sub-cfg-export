@@ -5,6 +5,7 @@ import {
   DownloadOutlined,
   FileSearchOutlined,
   GithubOutlined,
+  InfoCircleOutlined,
   InboxOutlined,
   SafetyCertificateOutlined,
   StopOutlined,
@@ -382,10 +383,10 @@ export default function App() {
             <Tag color="blue" variant="filled" className="project-tag">
               LOCAL-FIRST TOOL
             </Tag>
-            <Title level={1}>sub cfg export</Title>
+            <Title level={1}>封端机场导出Sub-Store订阅</Title>
             <Paragraph className="hero-description">
               从封端机场/梯子的 Windows 客户端中提取配置 URL、key 和 iv，
-              生成的 YAML 可在新版 SubStore 导入从而获取订阅。
+              生成的 YAML 可在新版 Sub-Store 导入从而获取订阅。
             </Paragraph>
             <Space wrap>
               <Tag icon={<SafetyCertificateOutlined />} color="success">
@@ -402,10 +403,15 @@ export default function App() {
       <section className="content-grid">
         <Card className="upload-card" variant="borderless">
           <Flex justify="space-between" align="flex-start" gap={20} wrap>
-            <div>
-              <Title level={3}>
-                选择安装包（从机场/梯子控制台下载，如为压缩包需提取其中的 xxx-setup.exe 文件）
-              </Title>
+            <div className="upload-heading">
+              <Title level={3}>选择安装包</Title>
+              <div className="installer-source-note">
+                <InfoCircleOutlined />
+                <span>
+                  <strong>说明：</strong>
+                  从机场/梯子控制台下载；如为压缩包，请先提取其中的 xxx-setup.exe 文件。
+                </span>
+              </div>
               <Paragraph type="secondary">
                 支持当前提取器兼容的 Windows Inno Setup EXE。选择后自动开始处理。
               </Paragraph>
@@ -570,7 +576,7 @@ export default function App() {
       )}
 
       <footer>
-        <Text type="secondary">sub cfg export · static local extractor</Text>
+        <Text type="secondary">封端机场导出Sub-Store订阅 · static local extractor</Text>
       </footer>
       </main>
     </>
