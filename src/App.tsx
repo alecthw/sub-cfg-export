@@ -403,7 +403,9 @@ export default function App() {
         <Card className="upload-card" variant="borderless">
           <Flex justify="space-between" align="flex-start" gap={20} wrap>
             <div>
-              <Title level={3}>选择安装包</Title>
+              <Title level={3}>
+                选择安装包（从机场/梯子控制台下载，如为压缩包需提取其中的 xxx-setup.exe 文件）
+              </Title>
               <Paragraph type="secondary">
                 支持当前提取器兼容的 Windows Inno Setup EXE。选择后自动开始处理。
               </Paragraph>
