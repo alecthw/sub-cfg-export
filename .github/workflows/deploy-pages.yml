@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
 
 concurrency:
   group: gh-pages
@@ -39,3 +40,22 @@ jobs:
           publish_branch: gh-pages
           publish_dir: ./dist
           force_orphan: true
+
+      - name: Configure gh-pages as Pages source
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const source = { branch: 'gh-pages', path: '/' }
+            try {
+              await github.request('GET /repos/{owner}/{repo}/pages', context.repo)
+              await github.request('PUT /repos/{owner}/{repo}/pages', {
+                ...context.repo,
+                source,
+              })
+            } catch (error) {
+              if (error.status !== 404) throw error
+              await github.request('POST /repos/{owner}/{repo}/pages', {
+                ...context.repo,
+                source,
+              })
+            }
