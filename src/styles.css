@@ -327,6 +327,40 @@ textarea {
   margin: 24px 0;
 }
 
+.result-guide {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  color: #3f4b61;
+  border: 1px solid #dce5f7;
+  border-radius: 13px;
+  background: #f4f7ff;
+}
+
+.result-guide-icon {
+  flex: 0 0 auto;
+  margin-top: 5px;
+  color: #2357d9;
+  font-size: 17px;
+}
+
+.result-guide .ant-typography {
+  margin: 0;
+  line-height: 1.8;
+}
+
+.result-guide-keyword {
+  display: inline-block;
+  margin: 0 4px;
+  padding: 0 7px;
+  color: #1848bd;
+  border-radius: 6px;
+  background: #dfe9ff;
+  line-height: 1.65;
+}
+
 .stat-box {
   display: flex;
   flex-direction: column;

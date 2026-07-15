@@ -20,6 +20,13 @@ async function selectInstaller(page: import('@playwright/test').Page, fileName: 
 test('globalcloud exports complete YAML without decrypt block', async ({ page }) => {
   await openApp(page)
   const yaml = await selectInstaller(page, 'globalcloud-2.2.3-windows-amd64-setup.exe')
+  await expect(page.locator('.result-guide')).toBeVisible()
+  await expect(page.locator('.result-guide-keyword')).toHaveText([
+    '单条订阅',
+    'API订阅',
+    '用户名',
+    '密码',
+  ])
   expect(yaml).toBe(
     [
       'cfgUrls:',
@@ -98,7 +105,7 @@ test('hero exposes GitHub and Sub-Store project links', async ({ page }) => {
   await expect(
     page.getByRole('heading', { level: 1, name: '封端机场导出Sub-Store订阅' }),
   ).toBeVisible()
-  await expect(page.getByText('说明：从机场/梯子控制台下载')).toBeVisible()
+  await expect(page.getByText('说明：从机场/梯子控制台下载 Windows 版本')).toBeVisible()
 
   const projectLink = page.getByRole('link', { name: '打开 sub cfg export GitHub 项目主页' })
   await expect(projectLink).toHaveAttribute('href', 'https://github.com/alecthw/sub-cfg-export')
@@ -165,4 +172,26 @@ test('offers the extraction failure issue template for unsupported installers', 
   expect(issueUrl.searchParams.get('template')).toBe('extraction-failure.md')
   expect(issueUrl.searchParams.get('title')).toBe('[提取失败] unsupported-client.exe')
   await expect(issueLink).toHaveAttribute('target', '_blank')
+})
+
+test('shows the mobile memory warning before the disclaimer', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value:
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+    })
+  })
+
+  await page.goto('/')
+  const mobileDialog = page.getByRole('dialog', { name: '移动端使用提示' })
+  await expect(mobileDialog).toBeVisible()
+  await expect(
+    mobileDialog.getByText('手机浏览器可能由于内存不足导致解析失败，请换 PC 端使用。'),
+  ).toBeVisible()
+  await expect(page.getByRole('dialog', { name: '免责声明与使用须知' })).toBeHidden()
+
+  await mobileDialog.getByRole('button', { name: '我知道了' }).click()
+  await expect(mobileDialog).toBeHidden()
+  await expect(page.getByRole('dialog', { name: '免责声明与使用须知' })).toBeVisible()
 })

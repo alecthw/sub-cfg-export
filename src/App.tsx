@@ -7,6 +7,7 @@ import {
   GithubOutlined,
   InfoCircleOutlined,
   InboxOutlined,
+  MobileOutlined,
   SafetyCertificateOutlined,
   StopOutlined,
 } from '@ant-design/icons'
@@ -78,6 +79,17 @@ function rememberDisclaimerAcceptance(): void {
   }
 }
 
+function isLikelyMobileDevice(): boolean {
+  const navigatorWithUaData = navigator as Navigator & {
+    userAgentData?: { mobile?: boolean }
+  }
+  if (navigatorWithUaData.userAgentData?.mobile) return true
+  if (/Android|iPhone|iPad|iPod|Mobile|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
+    return true
+  }
+  return window.innerWidth <= 768 && window.matchMedia('(pointer: coarse)').matches
+}
+
 function buildIssueUrl(fileName: string): string {
   const title = `[提取失败] ${fileName}`
   return `${ISSUE_TEMPLATE_URL}&title=${encodeURIComponent(title)}`
@@ -122,6 +134,7 @@ export default function App() {
   const [result, setResult] = useState<ExtractionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [disclaimerOpen, setDisclaimerOpen] = useState(() => !hasAcceptedDisclaimer())
+  const [mobileWarningOpen, setMobileWarningOpen] = useState(isLikelyMobileDevice)
   const [issuePrompt, setIssuePrompt] = useState<IssuePrompt | null>(null)
 
   const processing = !['idle', 'done', 'error'].includes(stage)
@@ -265,7 +278,32 @@ export default function App() {
   return (
     <>
       <Modal
-        open={disclaimerOpen}
+        open={mobileWarningOpen}
+        title={
+          <Space size={10}>
+            <MobileOutlined className="disclaimer-title-icon" />
+            <span>移动端使用提示</span>
+          </Space>
+        }
+        centered
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+        footer={
+          <Button type="primary" onClick={() => setMobileWarningOpen(false)}>
+            我知道了
+          </Button>
+        }
+      >
+        <Alert
+          type="warning"
+          showIcon
+          message="手机浏览器可能由于内存不足导致解析失败，请换 PC 端使用。"
+        />
+      </Modal>
+
+      <Modal
+        open={disclaimerOpen && !mobileWarningOpen}
         title={
           <Space size={10}>
             <SafetyCertificateOutlined className="disclaimer-title-icon" />
@@ -409,7 +447,7 @@ export default function App() {
                 <InfoCircleOutlined />
                 <span>
                   <strong>说明：</strong>
-                  从机场/梯子控制台下载；如为压缩包，请先提取其中的 xxx-setup.exe 文件。
+                  从机场/梯子控制台下载 Windows 版本；如为压缩包，请先提取其中的 xxx-setup.exe 文件。
                 </span>
               </div>
               <Paragraph type="secondary">
@@ -563,6 +601,29 @@ export default function App() {
                 </div>
               </Col>
             </Row>
+
+            <div className="result-guide" role="note">
+              <InfoCircleOutlined className="result-guide-icon" />
+              <Paragraph>
+                在 Sub-Store 中新建
+                <Text strong className="result-guide-keyword">
+                  单条订阅
+                </Text>
+                ，来源选择
+                <Text strong className="result-guide-keyword">
+                  API订阅
+                </Text>
+                ，将以下内容复制进去并填写
+                <Text strong className="result-guide-keyword">
+                  用户名
+                </Text>
+                和
+                <Text strong className="result-guide-keyword">
+                  密码
+                </Text>
+                ，即可通过 Sub-Store 获取到订阅内容。
+              </Paragraph>
+            </div>
 
             <Input.TextArea
               className="yaml-preview"
