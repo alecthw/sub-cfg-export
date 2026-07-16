@@ -135,13 +135,31 @@ textarea {
 }
 
 .hero h1.ant-typography {
-  max-width: 900px;
+  max-width: none;
   margin: 0;
   color: #fff;
-  font-size: clamp(40px, 5.2vw, 62px);
+  font-size: clamp(24px, 4.1vw, 50px);
   line-height: 1.08;
   letter-spacing: -0.045em;
-  text-wrap: balance;
+  white-space: nowrap;
+}
+
+.compatibility-note {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 11px;
+  color: #e6edff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.compatibility-note > .anticon {
+  color: #9fd4ff;
 }
 
 .hero-description.ant-typography {
@@ -569,10 +587,10 @@ footer {
   }
 
   .hero h1.ant-typography {
-    font-size: 38px;
+    font-size: clamp(14px, 4.5vw, 26px);
   }
 
-  .hero-description.ant-typography {
+.hero-description.ant-typography {
     font-size: 16px;
   }
 

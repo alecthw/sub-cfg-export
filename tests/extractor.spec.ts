@@ -19,6 +19,7 @@ async function selectInstaller(page: import('@playwright/test').Page, fileName: 
 test('globalcloud exports complete YAML without decrypt block', async ({ page }) => {
   await openApp(page)
   const yaml = await selectInstaller(page, 'globalcloud-2.2.3-windows-amd64-setup.exe')
+  await expect(page.locator('input[type="file"]')).toHaveCount(0)
   await expect(page.getByText('第 1 步完成')).toBeVisible()
   const guide = page.getByRole('region', { name: '接下来：在 Sub-Store 中使用导出的配置' })
   await expect(guide).toBeVisible()
@@ -49,6 +50,9 @@ test('globalcloud exports complete YAML without decrypt block', async ({ page })
     ].join('\n'),
   )
 
+  await page.getByRole('button', { name: '清除' }).click()
+  await expect(page.locator('input[type="file"]')).toHaveCount(1)
+  await expect(page.getByText('点击或拖入客户端安装包')).toBeVisible()
 })
 
 test('xmtz restores XOR URLs and decrypt values', async ({ page }) => {
@@ -100,10 +104,12 @@ test('removes legacy COI worker without reloading the page', async ({ page }) =>
 test('hero exposes GitHub and Sub-Store project links', async ({ page }) => {
   await openApp(page)
 
-  await expect(page).toHaveTitle('封端机场导出Sub-Store订阅')
+  await expect(page).toHaveTitle('在 Sub-Store 中获取封端机场订阅节点')
   await expect(
-    page.getByRole('heading', { level: 1, name: '封端机场导出Sub-Store订阅' }),
+    page.getByRole('heading', { level: 1, name: '在 Sub-Store 中获取封端机场订阅节点' }),
   ).toBeVisible()
+  await expect(page.getByText('当前仅适配 Nextin 系客户端')).toBeVisible()
+  await expect(page.getByRole('heading', { level: 3, name: '从安装包获取基础配置' })).toBeVisible()
   await expect(page.getByText('说明：从机场/梯子控制台下载 Windows 版本')).toBeVisible()
 
   const projectLink = page.getByRole('link', { name: '打开 sub cfg export GitHub 项目主页' })
@@ -116,6 +122,11 @@ test('hero exposes GitHub and Sub-Store project links', async ({ page }) => {
   await expect(subStoreLink).toHaveAttribute('target', '_blank')
   await expect(subStoreLink).toHaveAttribute('rel', 'noopener noreferrer')
   await expect(subStoreLink.locator('img')).toBeVisible()
+
+  const telegramLink = page.getByRole('link', { name: '打开 alecthw Telegram' })
+  await expect(telegramLink).toHaveAttribute('href', 'https://t.me/alecthw')
+  await expect(telegramLink).toHaveAttribute('target', '_blank')
+  await expect(telegramLink).toHaveAttribute('rel', 'noopener noreferrer')
 })
 
 test('requires disclaimer acceptance only on the first visit', async ({ page }) => {
@@ -193,4 +204,45 @@ test('shows the mobile memory warning before the disclaimer', async ({ page }) =
   await mobileDialog.getByRole('button', { name: '我知道了' }).click()
   await expect(mobileDialog).toBeHidden()
   await expect(page.getByRole('dialog', { name: '免责声明与使用须知' })).toBeVisible()
+})
+
+test('exposes crawlable SEO metadata and discovery files', async ({ page }) => {
+  await page.goto('/')
+
+  await expect(page).toHaveTitle('在 Sub-Store 中获取封端机场订阅节点')
+  await expect(page.locator('meta[name="description"]')).toHaveAttribute(
+    'content',
+    /Nextin 系 Windows 客户端安装包/,
+  )
+  await expect(page.locator('meta[name="robots"]')).toHaveAttribute('content', /index, follow/)
+  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+    'href',
+    'https://alecthw.github.io/sub-cfg-export/',
+  )
+  await expect(page.locator('meta[property="og:title"]')).toHaveAttribute(
+    'content',
+    '在 Sub-Store 中获取封端机场订阅节点',
+  )
+
+  const structuredData = JSON.parse(
+    (await page.locator('script[type="application/ld+json"]').textContent())!,
+  )
+  expect(structuredData['@type']).toBe('WebApplication')
+  expect(structuredData.url).toBe('https://alecthw.github.io/sub-cfg-export/')
+
+  const robotsResponse = await page.request.get('http://127.0.0.1:43217/robots.txt')
+  expect(robotsResponse.ok()).toBe(true)
+  expect(await robotsResponse.text()).toContain(
+    'Sitemap: https://alecthw.github.io/sub-cfg-export/sitemap.xml',
+  )
+
+  const sitemapResponse = await page.request.get('http://127.0.0.1:43217/sitemap.xml')
+  expect(sitemapResponse.ok()).toBe(true)
+  expect(await sitemapResponse.text()).toContain(
+    '<loc>https://alecthw.github.io/sub-cfg-export/</loc>',
+  )
+
+  const manifestResponse = await page.request.get('http://127.0.0.1:43217/site.webmanifest')
+  expect(manifestResponse.ok()).toBe(true)
+  expect((await manifestResponse.json()).name).toBe('在 Sub-Store 中获取封端机场订阅节点')
 })

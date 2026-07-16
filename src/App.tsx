@@ -9,6 +9,7 @@ import {
   MobileOutlined,
   SafetyCertificateOutlined,
   StopOutlined,
+  TelegramFilled,
 } from '@ant-design/icons'
 import {
   Alert,
@@ -411,16 +412,31 @@ export default function App() {
               <img src={subStoreLogo} alt="" />
             </a>
           </Tooltip>
+          <Tooltip title="Telegram">
+            <a
+              className="hero-link-button"
+              href="https://t.me/alecthw"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="打开 alecthw Telegram"
+            >
+              <TelegramFilled />
+            </a>
+          </Tooltip>
         </nav>
         <div className="hero-content">
           <Space orientation="vertical" size={14}>
             <Tag color="blue" variant="filled" className="project-tag">
               LOCAL-FIRST TOOL
             </Tag>
-            <Title level={1}>封端机场导出Sub-Store订阅</Title>
+            <Title level={1}>在 Sub-Store 中获取封端机场订阅节点</Title>
+            <div className="compatibility-note">
+              <InfoCircleOutlined />
+              <span>当前仅适配 Nextin 系客户端</span>
+            </div>
             <Paragraph className="hero-description">
               从封端机场/梯子的 Windows 客户端中提取配置 URL、key 和 iv，
-              生成的 YAML 可在新版 Sub-Store 导入从而获取订阅。
+              生成的 YAML 可在 Sub-Store 配合脚本获取订阅节点。
             </Paragraph>
             <Space wrap>
               <Tag icon={<SafetyCertificateOutlined />} color="success">
@@ -442,7 +458,7 @@ export default function App() {
                 <Tag color="blue" className="flow-step-tag">
                   第 1 步
                 </Tag>
-                <Title level={3}>选择安装包</Title>
+                <Title level={3}>从安装包获取基础配置</Title>
               </div>
               <div className="installer-source-note">
                 <InfoCircleOutlined />
@@ -462,19 +478,21 @@ export default function App() {
             )}
           </Flex>
 
-          <Dragger
-            accept=".exe,application/x-msdownload"
-            beforeUpload={beforeUpload}
-            showUploadList={false}
-            disabled={processing}
-            className="installer-dragger"
-          >
-            <p className="ant-upload-drag-icon">
-              <InboxOutlined />
-            </p>
-            <p className="ant-upload-text">点击或拖入客户端安装包</p>
-            <p className="ant-upload-hint">整个解析过程仅在当前浏览器标签页中完成</p>
-          </Dragger>
+          {!file && (
+            <Dragger
+              accept=".exe,application/x-msdownload"
+              beforeUpload={beforeUpload}
+              showUploadList={false}
+              disabled={processing}
+              className="installer-dragger"
+            >
+              <p className="ant-upload-drag-icon">
+                <InboxOutlined />
+              </p>
+              <p className="ant-upload-text">点击或拖入客户端安装包</p>
+              <p className="ant-upload-hint">整个解析过程仅在当前浏览器标签页中完成</p>
+            </Dragger>
+          )}
 
           {file && (
             <div className="selected-file">
@@ -620,7 +638,7 @@ export default function App() {
       )}
 
       <footer>
-        <Text type="secondary">封端机场导出Sub-Store订阅 · static local extractor</Text>
+        <Text type="secondary">在 Sub-Store 中获取封端机场订阅节点 · static local extractor</Text>
       </footer>
       </main>
     </>
