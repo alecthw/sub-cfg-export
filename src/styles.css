@@ -208,8 +208,20 @@ textarea {
   max-width: 760px;
 }
 
-.upload-heading h3.ant-typography {
+.upload-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin-bottom: 12px;
+}
+
+.upload-heading h3.ant-typography {
+  margin: 0;
+}
+
+.flow-step-tag {
+  flex: 0 0 auto;
+  margin-inline-end: 0;
 }
 
 .installer-source-note {
@@ -318,6 +330,10 @@ textarea {
   margin: 0;
 }
 
+.result-step-tag {
+  margin-bottom: 7px;
+}
+
 .success-icon {
   color: #16a267;
   font-size: 34px;
@@ -325,40 +341,6 @@ textarea {
 
 .stats-row {
   margin: 24px 0;
-}
-
-.result-guide {
-  display: flex;
-  align-items: flex-start;
-  gap: 11px;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-  color: #3f4b61;
-  border: 1px solid #dce5f7;
-  border-radius: 13px;
-  background: #f4f7ff;
-}
-
-.result-guide-icon {
-  flex: 0 0 auto;
-  margin-top: 5px;
-  color: #2357d9;
-  font-size: 17px;
-}
-
-.result-guide .ant-typography {
-  margin: 0;
-  line-height: 1.8;
-}
-
-.result-guide-keyword {
-  display: inline-block;
-  margin: 0 4px;
-  padding: 0 7px;
-  color: #1848bd;
-  border-radius: 6px;
-  background: #dfe9ff;
-  line-height: 1.65;
 }
 
 .stat-box {
@@ -378,6 +360,117 @@ textarea {
   box-shadow: none !important;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 13px;
+  line-height: 1.65;
+}
+
+.result-next-steps {
+  margin-top: 28px;
+  padding-top: 26px;
+  border-top: 1px solid #e5eaf4;
+}
+
+.result-next-header {
+  margin-bottom: 18px;
+}
+
+.result-next-header h3.ant-typography {
+  margin: 0 0 7px;
+}
+
+.result-next-header .ant-typography {
+  margin-bottom: 0;
+}
+
+.workflow-details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+.workflow-step {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid #e5eaf4;
+  border-radius: 16px;
+  background: #fafbfe;
+}
+
+.workflow-step-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.workflow-step-number {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: #fff;
+  border-radius: 10px;
+  background: #2357d9;
+  box-shadow: 0 8px 18px rgba(35, 87, 217, 0.22);
+  font-weight: 700;
+}
+
+.workflow-step h4.ant-typography {
+  margin: 0;
+}
+
+.workflow-step > .ant-typography {
+  line-height: 1.8;
+}
+
+.workflow-keyword {
+  display: inline-block;
+  margin: 0 4px;
+  padding: 0 7px;
+  color: #1848bd;
+  border-radius: 6px;
+  background: #dfe9ff;
+  line-height: 1.65;
+}
+
+.provider-script-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0 16px;
+  padding: 12px;
+  border: 1px solid #d8e2f5;
+  border-radius: 12px;
+  background: #f1f5fd;
+}
+
+.provider-script-url {
+  display: block;
+  overflow-wrap: anywhere;
+  color: #173b91;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.workflow-screenshot {
+  display: block;
+  overflow: hidden;
+  border: 1px solid #e0e5ef;
+  border-radius: 12px;
+  background: #f5f7fb;
+}
+
+.workflow-screenshot .ant-image-img,
+img.workflow-screenshot {
+  display: block;
+  width: 100%;
+  border-radius: 12px;
+}
+
+.workflow-tip {
+  display: block;
+  margin-top: 10px;
   line-height: 1.65;
 }
 
@@ -402,6 +495,10 @@ footer {
 
   .result-section {
     padding: 0 14px;
+  }
+
+  .workflow-details {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -491,5 +588,10 @@ footer {
 
   .result-section {
     padding: 0 7px;
+  }
+
+  .result-next-steps {
+    margin-top: 22px;
+    padding-top: 20px;
   }
 }

@@ -2,7 +2,6 @@ import {
   CheckCircleFilled,
   CopyOutlined,
   DeleteOutlined,
-  DownloadOutlined,
   FileSearchOutlined,
   GithubOutlined,
   InfoCircleOutlined,
@@ -34,6 +33,7 @@ import {
 } from 'antd'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import subStoreLogo from './assets/sub-store-logo.png'
+import UsageGuide from './components/UsageGuide'
 import type {
   ExtractionResult,
   ExtractionStage,
@@ -110,18 +110,6 @@ function formatBytes(bytes: number): string {
 function formatDuration(milliseconds: number): string {
   if (milliseconds < 1000) return `${milliseconds} ms`
   return `${(milliseconds / 1000).toFixed(2)} s`
-}
-
-function saveTextFile(name: string, content: string) {
-  const blob = new Blob([content], { type: 'application/yaml;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = name
-  document.body.append(anchor)
-  anchor.click()
-  anchor.remove()
-  URL.revokeObjectURL(url)
 }
 
 export default function App() {
@@ -258,11 +246,19 @@ export default function App() {
     void message.success('YAML 已复制')
   }, [message, result])
 
-  const downloadYaml = useCallback(() => {
-    if (!result) return
-    saveTextFile(result.outputName, result.yaml)
-    void message.success(`已导出 ${result.outputName}`)
-  }, [message, result])
+  const providerScriptUrl = useMemo(
+    () => new URL('provider-api-subscription.js', document.baseURI).href,
+    [],
+  )
+
+  const copyProviderScriptUrl = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(providerScriptUrl)
+      void message.success('脚本 URL 已复制')
+    } catch {
+      void message.error('复制失败，请手动复制脚本 URL')
+    }
+  }, [message, providerScriptUrl])
 
   const stepItems = useMemo(
     () => [
@@ -442,7 +438,12 @@ export default function App() {
         <Card className="upload-card" variant="borderless">
           <Flex justify="space-between" align="flex-start" gap={20} wrap>
             <div className="upload-heading">
-              <Title level={3}>选择安装包</Title>
+              <div className="upload-title-row">
+                <Tag color="blue" className="flow-step-tag">
+                  第 1 步
+                </Tag>
+                <Title level={3}>选择安装包</Title>
+              </div>
               <div className="installer-source-note">
                 <InfoCircleOutlined />
                 <span>
@@ -567,6 +568,9 @@ export default function App() {
               <Space>
                 <CheckCircleFilled className="success-icon" />
                 <div>
+                  <Tag color="success" className="result-step-tag">
+                    第 1 步完成
+                  </Tag>
                   <Title level={3}>配置已导出</Title>
                   <Text type="secondary">{result.outputName}</Text>
                 </div>
@@ -574,9 +578,6 @@ export default function App() {
               <Space wrap>
                 <Button icon={<CopyOutlined />} onClick={() => void copyYaml()}>
                   复制
-                </Button>
-                <Button type="primary" icon={<DownloadOutlined />} onClick={downloadYaml}>
-                  下载 YAML
                 </Button>
               </Space>
             </Flex>
@@ -602,35 +603,17 @@ export default function App() {
               </Col>
             </Row>
 
-            <div className="result-guide" role="note">
-              <InfoCircleOutlined className="result-guide-icon" />
-              <Paragraph>
-                在 Sub-Store 中新建
-                <Text strong className="result-guide-keyword">
-                  单条订阅
-                </Text>
-                ，来源选择
-                <Text strong className="result-guide-keyword">
-                  API订阅
-                </Text>
-                ，将以下内容复制进去并填写
-                <Text strong className="result-guide-keyword">
-                  用户名
-                </Text>
-                和
-                <Text strong className="result-guide-keyword">
-                  密码
-                </Text>
-                ，即可通过 Sub-Store 获取到订阅内容。
-              </Paragraph>
-            </div>
-
             <Input.TextArea
               className="yaml-preview"
               value={result.yaml}
               readOnly
               autoSize={{ minRows: 14, maxRows: 28 }}
               spellCheck={false}
+            />
+
+            <UsageGuide
+              scriptUrl={providerScriptUrl}
+              onCopyScriptUrl={() => void copyProviderScriptUrl()}
             />
           </Card>
         </section>

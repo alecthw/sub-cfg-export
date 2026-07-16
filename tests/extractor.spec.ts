@@ -1,5 +1,4 @@
 import { expect, test } from '@playwright/test'
-import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const root = process.cwd()
@@ -20,13 +19,20 @@ async function selectInstaller(page: import('@playwright/test').Page, fileName: 
 test('globalcloud exports complete YAML without decrypt block', async ({ page }) => {
   await openApp(page)
   const yaml = await selectInstaller(page, 'globalcloud-2.2.3-windows-amd64-setup.exe')
-  await expect(page.locator('.result-guide')).toBeVisible()
-  await expect(page.locator('.result-guide-keyword')).toHaveText([
-    '单条订阅',
-    'API订阅',
-    '用户名',
-    '密码',
-  ])
+  await expect(page.getByText('第 1 步完成')).toBeVisible()
+  const guide = page.getByRole('region', { name: '接下来：在 Sub-Store 中使用导出的配置' })
+  await expect(guide).toBeVisible()
+  await expect(guide.getByRole('heading', { name: '创建本地订阅' })).toBeVisible()
+  await expect(guide.getByRole('heading', { name: '添加节点脚本操作' })).toBeVisible()
+  await expect(guide.getByText('本地订阅', { exact: true })).toBeVisible()
+  await expect(guide.getByText('脚本操作', { exact: true })).toBeVisible()
+  await expect(guide.getByAltText('Sub-Store 新建本地订阅操作示例')).toBeVisible()
+  await expect(guide.getByAltText('Sub-Store 节点操作添加脚本 URL 示例')).toBeVisible()
+  const scriptUrl = await guide.locator('.provider-script-url').textContent()
+  expect(scriptUrl).toBe('http://127.0.0.1:43217/provider-api-subscription.js')
+  const scriptResponse = await page.request.get(scriptUrl!)
+  expect(scriptResponse.ok()).toBe(true)
+  expect(await scriptResponse.text()).toContain('async function operator')
   expect(yaml).toBe(
     [
       'cfgUrls:',
@@ -43,13 +49,6 @@ test('globalcloud exports complete YAML without decrypt block', async ({ page })
     ].join('\n'),
   )
 
-  const downloadPromise = page.waitForEvent('download')
-  await page.getByRole('button', { name: '下载 YAML' }).click()
-  const download = await downloadPromise
-  expect(download.suggestedFilename()).toBe('globalcloud-2.2.3-windows-amd64-setup.yaml')
-  const savedPath = await download.path()
-  expect(savedPath).not.toBeNull()
-  expect(await readFile(savedPath!, 'utf8')).toBe(yaml)
 })
 
 test('xmtz restores XOR URLs and decrypt values', async ({ page }) => {
