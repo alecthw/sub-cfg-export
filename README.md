@@ -1,6 +1,10 @@
 # sub cfg export
 
-一个纯浏览器、纯静态的 mihomo 客户端配置提取工具。用户选择 Windows EXE 安装包后，程序会在本地解析 Inno Setup 的 LZMA2 数据、扫描配置 URL，并在存在时提取 decrypt key/iv，最后下载完整 YAML。
+一个纯浏览器、纯静态的封端机场客户端配置提取工具，配合 Sub-Store 可获得订阅节点。
+
+工具界面有详细的使用引导：<https://alecthw.github.io/sub-cfg-export/>
+
+用户选择 Windows EXE 安装包后，程序会在本地解析 Inno Setup 的 LZMA2 数据、扫描配置 URL，并在存在时提取 decrypt key/iv，最后生成完整 YAML。
 
 文件不会上传，也不需要后台服务，可直接部署到 GitHub Pages。
 
