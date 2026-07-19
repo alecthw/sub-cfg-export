@@ -1,4 +1,16 @@
-import { expect, test } from '@playwright/test'
+import { chromium, expect, test as base, type Page } from '@playwright/test'
+
+const test = base.extend<{ page: Page }>({
+  page: async ({}, use) => {
+    const browser = await chromium.launch()
+    const page = await browser.newPage()
+    try {
+      await use(page)
+    } finally {
+      await browser.close()
+    }
+  },
+})
 import path from 'node:path'
 
 const root = process.cwd()
@@ -33,7 +45,11 @@ test('globalcloud exports complete YAML without decrypt block', async ({ page })
   expect(scriptUrl).toBe('http://127.0.0.1:43217/provider-api-subscription.js')
   const scriptResponse = await page.request.get(scriptUrl!)
   expect(scriptResponse.ok()).toBe(true)
-  expect(await scriptResponse.text()).toContain('async function operator')
+  const providerScript = await scriptResponse.text()
+  expect(providerScript).toContain('async function operator')
+  expect(providerScript).toContain('decryptOssConfig')
+  expect(providerScript).toContain('searchParams.set("flag", "clash")')
+  expect(providerScript).not.toContain('SUBSCRIPTION_USER_AGENT')
   expect(yaml).toBe(
     [
       'cfgUrls:',
@@ -44,7 +60,7 @@ test('globalcloud exports complete YAML without decrypt block', async ({ page })
       'username:',
       'password:',
       'headers:',
-      '  User-Agent: NetFlow/v3.0.6 clash-verge Platform/linux',
+      '  User-Agent: NetFlow/v2.2.4 clash-verge Platform/windows',
       'decrypt: null',
       '',
     ].join('\n'),
@@ -62,6 +78,43 @@ test('xmtz restores XOR URLs and decrypt values', async ({ page }) => {
   expect(yaml).toContain('https://apisa.cnossfile.com/saos/xmtz_news.json')
   expect(yaml).toContain('https://cdno01.llguanglisf.com/saos/xmtz_news.json')
   expect(yaml).toContain('https://ocdn01.llguangli25o.com:59991/saos/xmtz_news.json')
+  expect(yaml).toContain('User-Agent: NetFlow/v3.0.6 clash-verge Platform/windows')
+  expect(yaml).toContain('key: 10b78659c06ec08a')
+  expect(yaml).toContain('iv: e8be417610d21adc')
+})
+
+test('xjkp restores URLs and verified decrypt values', async ({ page }) => {
+  await openApp(page)
+  const yaml = await selectInstaller(page, 'xjkpapp-lite.exe')
+  expect(yaml).toContain('https://tcdn.getxlx.com/saos/xjkp_news.json')
+  expect(yaml).toContain('https://apisa.cnossfile.com/saos/xjkp_news.json')
+  expect(yaml).toContain('https://cdno01.llguanglisf.com/saos/xjkp_news.json')
+  expect(yaml).toContain('https://ocdn01.llguangli25o.com:59991/saos/xjkp_news.json')
+  expect(yaml).toContain('User-Agent: NetFlow/v3.0.6 clash-verge Platform/windows')
+  expect(yaml).toContain('key: 10b78659c06ec08a')
+  expect(yaml).toContain('iv: e8be417610d21adc')
+})
+
+test('jilianyun exports all configuration URLs', async ({ page }) => {
+  await openApp(page)
+  const yaml = await selectInstaller(page, 'jilianyun-2.2.3-windows-amd64-setup.exe')
+  expect(yaml).toContain('http://config.jlyvipaff.cc/oss/ConFigOss.json')
+  expect(yaml).toContain('https://config.jlyvipaff.cc/oss/ConFigOss.json')
+  expect(yaml).toContain('https://down-apps.oss-cn-hongkong.aliyuncs.com/jly/ConFigOss.json')
+  expect(yaml).toContain('https://download.guangsap1.com/jly/ConFigOss.json')
+  expect(yaml).toContain('User-Agent: NetFlow/v2.2.4 clash-verge Platform/windows')
+  expect(yaml).toContain('decrypt: null')
+})
+
+test('securitynet exports the branded client User-Agent', async ({ page }) => {
+  await openApp(page)
+  const yaml = await selectInstaller(page, '3.1.8-windows-amd64-setup.exe')
+  expect(yaml).toContain(
+    'User-Agent: securitynet/v3.1.8 clash-verge Platform/windows',
+  )
+  expect(yaml).toContain(
+    'https://shanhaioss-1426331524.cos.ap-guangzhou.myqcloud.com/ConFigOss.json',
+  )
   expect(yaml).toContain('key: 4422a60e08c97f30')
   expect(yaml).toContain('iv: 8c97f304422a60e0')
 })

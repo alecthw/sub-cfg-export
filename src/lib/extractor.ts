@@ -7,6 +7,18 @@ const FULL_URL_JSON_RE =
 const HEX16_RE = /^[0-9a-fA-F]{16}$/
 const SNAPSHOT_MAGIC = new Uint8Array([0xf5, 0xf5, 0xdc, 0xdc])
 const textDecoder = new TextDecoder('windows-1252')
+const utf16Decoder = new TextDecoder('utf-16le')
+const DEFAULT_USER_AGENT = 'NetFlow/v2.2.4 clash-verge Platform/windows'
+const USER_AGENT_BRANDS = [
+  { value: 'NetFlow', bytes: new TextEncoder().encode('NetFlow') },
+  { value: 'securitynet', bytes: new TextEncoder().encode('securitynet') },
+]
+const CLASH_VERGE = new TextEncoder().encode('clash-verge')
+const PLATFORM_WINDOWS = new TextEncoder().encode('Platform/windows')
+const PLATFORM_LINUX = new TextEncoder().encode('Platform/linux')
+const PRODUCT_VERSION_UTF16 = new Uint8Array(
+  [...'ProductVersion'].flatMap((character) => [character.charCodeAt(0), 0]),
+)
 
 interface SnapshotInfo {
   start: number
@@ -408,6 +420,13 @@ function selectDecryptValues(
   dartUrls: PositionedValue[],
   hexValues: PositionedValue[],
 ): DecryptInfo | null {
+  const liteFamily =
+    selectedUrls.length === 4 &&
+    selectedUrls.every((url) => /\/saos\/(?:xjkp|xmtz)_news\.json$/i.test(new URL(url).pathname))
+  if (liteFamily) {
+    return { key: '10b78659c06ec08a', iv: 'e8be417610d21adc' }
+  }
+
   const selectedSet = new Set(selectedUrls)
   const positions = dartUrls
     .filter((item) => selectedSet.has(item.value))
@@ -426,6 +445,35 @@ function selectDecryptValues(
   return { key, iv }
 }
 
+function extractProductVersion(installer: Uint8Array): string | null {
+  let searchPos = 0
+  while (searchPos < installer.length) {
+    const markerPos = findSequence(installer, PRODUCT_VERSION_UTF16, searchPos)
+    if (markerPos < 0) return null
+    const text = utf16Decoder.decode(
+      installer.subarray(markerPos, Math.min(installer.length, markerPos + 512)),
+    )
+    const version = text.match(/\d+\.\d+\.\d+/)?.[0]
+    if (version) return version
+    searchPos = markerPos + PRODUCT_VERSION_UTF16.length
+  }
+  return null
+}
+
+function extractUserAgent(installer: Uint8Array, payload: Uint8Array): string {
+  const brand = USER_AGENT_BRANDS.find(({ bytes }) => findSequence(payload, bytes) >= 0)?.value
+  const version = extractProductVersion(installer)
+  const hasClashVerge = findSequence(payload, CLASH_VERGE) >= 0
+  const platform =
+    findSequence(payload, PLATFORM_WINDOWS) >= 0
+      ? 'windows'
+      : findSequence(payload, PLATFORM_LINUX) >= 0
+        ? 'linux'
+        : null
+  if (!brand || !version || !hasClashVerge || !platform) return DEFAULT_USER_AGENT
+  return `${brand}/v${version} clash-verge Platform/${platform}`
+}
+
 function yamlScalar(value: string): string {
   if (/^[A-Za-z0-9:/?&=._~%+\-]+$/.test(value)) return value
   return `'${value.replaceAll("'", "''")}'`
@@ -437,7 +485,7 @@ export function renderYaml(info: ExtractedInfo): string {
   lines.push('username:')
   lines.push('password:')
   lines.push('headers:')
-  lines.push('  User-Agent: NetFlow/v3.0.6 clash-verge Platform/linux')
+  lines.push(`  User-Agent: ${info.userAgent}`)
   if (info.decrypt) {
     lines.push('decrypt:')
     lines.push(`  key: ${yamlScalar(info.decrypt.key)}`)
@@ -454,5 +502,6 @@ export function extractInfo(installer: Uint8Array, payload: Uint8Array): Extract
   const { urls: dartUrls, hexValues } = selectSnapshotInfo(payload)
   const cfgUrls = selectConfigUrls(unique([...rawUrls, ...payloadUrls]), dartUrls)
   const decrypt = selectDecryptValues(cfgUrls, dartUrls, hexValues)
-  return { cfgUrls, decrypt }
+  const userAgent = extractUserAgent(installer, payload)
+  return { cfgUrls, userAgent, decrypt }
 }

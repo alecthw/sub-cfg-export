@@ -20,6 +20,7 @@ export interface DecryptInfo {
 
 export interface ExtractedInfo {
   cfgUrls: string[]
+  userAgent: string
   decrypt: DecryptInfo | null
 }
 

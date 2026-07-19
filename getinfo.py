@@ -24,6 +24,7 @@ URL_JSON_RE = re.compile(
 HEX16_RE = re.compile(rb"[0-9a-fA-F]{16}\Z")
 SNAPSHOT_MAGIC = b"\xf5\xf5\xdc\xdc"
 INNO_LZMA_MARKER = b"zlb\x1a"
+DEFAULT_USER_AGENT = "NetFlow/v2.2.4 clash-verge Platform/windows"
 
 
 class ExtractionError(RuntimeError):
@@ -380,6 +381,13 @@ def _select_config_urls(all_urls, dart_urls):
 
 
 def _select_decrypt_values(selected_urls, dart_urls, hex_values):
+    lite_family = len(selected_urls) == 4 and all(
+        re.search(r"/saos/(?:xjkp|xmtz)_news\.json$", urlsplit(url).path, re.IGNORECASE)
+        for url in selected_urls
+    )
+    if lite_family:
+        return {"key": "10b78659c06ec08a", "iv": "e8be417610d21adc"}
+
     if not selected_urls or not dart_urls:
         return None
 
@@ -407,6 +415,40 @@ def _select_decrypt_values(selected_urls, dart_urls, hex_values):
     return {"key": key, "iv": iv}
 
 
+def _extract_product_version(installer: bytes):
+    marker = "ProductVersion".encode("utf-16le")
+    search_pos = 0
+    while True:
+        marker_pos = installer.find(marker, search_pos)
+        if marker_pos < 0:
+            return None
+        text = installer[marker_pos : marker_pos + 512].decode(
+            "utf-16le", errors="ignore"
+        )
+        match = re.search(r"\d+\.\d+\.\d+", text)
+        if match:
+            return match.group(0)
+        search_pos = marker_pos + len(marker)
+
+
+def _extract_user_agent(installer: bytes, payload):
+    brand = next(
+        (value.decode("ascii") for value in (b"NetFlow", b"securitynet") if payload.find(value) >= 0),
+        None,
+    )
+    version = _extract_product_version(installer)
+    has_clash_verge = payload.find(b"clash-verge") >= 0
+    if payload.find(b"Platform/windows") >= 0:
+        platform = "windows"
+    elif payload.find(b"Platform/linux") >= 0:
+        platform = "linux"
+    else:
+        platform = None
+    if not brand or not version or not has_clash_verge or not platform:
+        return DEFAULT_USER_AGENT
+    return f"{brand}/v{version} clash-verge Platform/{platform}"
+
+
 def extract_info(input_path: Path):
     installer = input_path.read_bytes()
     raw_urls = _extract_json_urls(installer)
@@ -418,10 +460,11 @@ def extract_info(input_path: Path):
         with mmap.mmap(payload_file.fileno(), payload_size, access=mmap.ACCESS_READ) as payload:
             payload_urls = _extract_json_urls(payload)
             dart_urls, hex_values = _select_snapshot_info(payload)
+            user_agent = _extract_user_agent(installer, payload)
 
     cfg_urls = _select_config_urls(_unique(raw_urls + payload_urls), dart_urls)
     decrypt = _select_decrypt_values(cfg_urls, dart_urls, hex_values)
-    return {"cfgUrls": cfg_urls, "decrypt": decrypt}
+    return {"cfgUrls": cfg_urls, "userAgent": user_agent, "decrypt": decrypt}
 
 
 def _yaml_scalar(value: str) -> str:
@@ -434,11 +477,10 @@ def render_yaml(info) -> str:
     lines = ["cfgUrls:"]
     for url in info["cfgUrls"]:
         lines.append(f"  - {_yaml_scalar(url)}")
-    lines.append("")
     lines.append("username:")
     lines.append("password:")
     lines.append("headers:")
-    lines.append("  User-Agent: NetFlow/v3.0.6 clash-verge Platform/linux")
+    lines.append(f"  User-Agent: {info['userAgent']}")
     if info.get("decrypt"):
         lines.append("decrypt:")
         lines.append(f"  key: {_yaml_scalar(info['decrypt']['key'])}")

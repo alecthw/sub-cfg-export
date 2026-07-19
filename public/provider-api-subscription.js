@@ -30,6 +30,7 @@ async function operator(proxies, targetPlatform, context) {
     ? ""
     : String(context.raw);
   const config = parseConfig(raw);
+  const activeSubscriptionHeaders = config.headers;
   const configHash = getHash(stableStringify(config));
   const subscribeUrlCacheKey = `${SUBSCRIBE_URL_CACHE_PREFIX}${configHash}`;
   const noCache = isEnabled(
@@ -45,12 +46,22 @@ async function operator(proxies, targetPlatform, context) {
     globalThis.process?.env?.SUB_STORE_BACKEND_DEFAULT_PROXY;
 
   const fetchAndParse = async (subscribeUrl) => {
-    const content = await fetchSubscriptionContent(subscribeUrl);
-    const parsed = ProxyUtils.parse(content);
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      throw new Error("provider API 订阅未解析到有效节点");
+    let lastError;
+    for (const requestUrl of subscriptionUrlVariants(subscribeUrl)) {
+      for (const strategy of subscriptionStrategies()) {
+        try {
+          const content = await fetchSubscriptionContent(requestUrl, strategy);
+          const parsed = ProxyUtils.parse(content);
+          if (!Array.isArray(parsed) || parsed.length === 0) {
+            throw new Error("provider API 订阅未解析到有效节点");
+          }
+          return parsed;
+        } catch (error) {
+          lastError = error;
+        }
+      }
     }
-    return parsed;
+    throw lastError || new Error("provider API 订阅未解析到有效节点");
   };
 
   const cachedSubscribeUrl = normalizeString(
@@ -213,16 +224,18 @@ async function operator(proxies, targetPlatform, context) {
     });
     let cfg;
     try {
-      const decoded = b64d(
-        normalizeString(response.body)
-          .trim()
-          .replace(/^\uFEFF/, "")
-          .replace(/-/g, "+")
-          .replace(/_/g, "/")
-      );
-      cfg = JSON.parse(decoded);
-    } catch (error) {
-      throw new Error(`cfgUrl 内容解析失败: ${errorMessage(error)}`);
+      cfg = JSON.parse(decodeBase64Text(response.body));
+    } catch (plainError) {
+      if (!config.decrypt) {
+        throw new Error(`cfgUrl 内容解析失败: ${errorMessage(plainError)}`);
+      }
+      try {
+        cfg = JSON.parse(decryptOssConfig(response.body, config.decrypt));
+      } catch (decryptError) {
+        throw new Error(
+          `cfgUrl 内容解密失败: ${errorMessage(decryptError)}`
+        );
+      }
     }
     const hosts = [
       ...(Array.isArray(cfg?.hosts) ? cfg.hosts : []),
@@ -264,66 +277,64 @@ async function operator(proxies, targetPlatform, context) {
     return { subscribeUrl, token };
   }
 
-  async function fetchSubscriptionContent(subscribeUrl) {
-    if (!config.decrypt) {
-      const requestUrl = buildDownloadUrl(subscribeUrl, config.headers);
-      const downloaded = await ProxyUtils.download(
-        requestUrl,
-        undefined,
-        timeout,
-        proxy,
-        undefined,
-        undefined,
-        noCache,
-        true,
-        { returnRaw: true }
-      );
-      const content = downloaded?.result ?? downloaded;
-      if (!normalizeString(content).trim()) {
-        throw new Error("provider API 订阅内容为空");
+  function subscriptionUrlVariants(value) {
+    const original = normalizeString(value).split("#")[0].trim();
+    try {
+      const url = new URL(original);
+      if (url.protocol !== "http:" && url.protocol !== "https:") {
+        return [original];
       }
-      return normalizeString(content);
+      const clashUrl = new URL(url);
+      clashUrl.searchParams.set("flag", "clash");
+      return unique([clashUrl.toString(), original]);
+    } catch (error) {
+      return [original];
     }
-
-    const body = await fetchEncryptedContent(subscribeUrl);
-    return decryptSubscriptionBody(body, config.decrypt);
   }
 
-  async function fetchEncryptedContent(url) {
-    const cacheKey = `${CACHE_PREFIX}encrypted:${getHash(
-      `${stableStringify(config.headers)}:${url}`
-    )}`;
-    const cached = noCache ? null : scriptResourceCache.get(cacheKey);
-    if (cached) return Buffer.from(cached, "base64");
-
-    const response = await request("get", url, {
-      headers: config.headers,
-      encoding: null,
-    });
-    const bytes = toBuffer(response.body);
-    if (bytes.length === 0) throw new Error("provider API 订阅内容为空");
-
-    const cacheThreshold = Number(settings.cacheThreshold || 1024);
-    if (!cacheThreshold || bytes.length / 1024 <= cacheThreshold) {
-      const ttl = positiveNumber($arguments?.cacheTtl)
-        ? Number($arguments.cacheTtl) * 1000
-        : undefined;
-      scriptResourceCache.set(cacheKey, bytes.toString("base64"), ttl);
-    }
-    return bytes;
+  function subscriptionStrategies() {
+    const configured = { headers: config.headers, decrypt: null };
+    if (!config.decrypt) return [configured];
+    return [{ headers: config.headers, decrypt: config.decrypt }, configured];
   }
 
-  function decryptSubscriptionBody(body, decrypt) {
+  async function fetchSubscriptionContent(subscribeUrl, strategy) {
+    if (strategy.decrypt) {
+      const response = await request("get", subscribeUrl, {
+        headers: strategy.headers,
+        encoding: null,
+      });
+      return decryptAesBase64(response.body, strategy.decrypt);
+    }
+
+    const requestUrl = buildDownloadUrl(subscribeUrl, strategy.headers);
+    const downloaded = await ProxyUtils.download(
+      requestUrl,
+      undefined,
+      timeout,
+      proxy,
+      undefined,
+      undefined,
+      noCache,
+      true,
+      { returnRaw: true }
+    );
+    const content = downloaded?.result ?? downloaded;
+    if (!normalizeString(content).trim()) {
+      throw new Error("provider API 订阅内容为空");
+    }
+    return normalizeString(content);
+  }
+
+  function decryptOssConfig(body, decrypt) {
+    return decryptAesBase64(body, decrypt);
+  }
+
+  function decryptAesBase64(body, decrypt) {
     if (!$substore.env?.isNode || typeof require !== "function") {
-      throw new Error("decrypt 配置仅支持运行在 Node.js 后端的 Sub-Store");
+      throw new Error("AES 解密仅支持运行在 Node.js 后端的 Sub-Store");
     }
     const crypto = require("crypto");
-    const zlib = require("zlib");
-    let bytes = toBuffer(body);
-    if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
-      bytes = zlib.gunzipSync(bytes);
-    }
-
     const key = Buffer.from(decrypt.key);
     const iv = Buffer.from(decrypt.iv);
     if (key.length !== 16 || iv.length !== 16) {
@@ -331,12 +342,24 @@ async function operator(proxies, targetPlatform, context) {
     }
     const decipher = crypto.createDecipheriv("aes-128-cbc", key, iv);
     const plainText = Buffer.concat([
-      decipher.update(Buffer.from(bytes.toString("utf8").trim(), "base64")),
+      decipher.update(Buffer.from(normalizeBase64(body), "base64")),
       decipher.final(),
     ]);
     return Buffer.from(plainText.toString("utf8").trim(), "base64").toString(
       "utf8"
     );
+  }
+
+  function decodeBase64Text(value) {
+    return b64d(normalizeBase64(value));
+  }
+
+  function normalizeBase64(value) {
+    return normalizeString(value)
+      .trim()
+      .replace(/^\uFEFF/, "")
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
   }
 
   async function request(method, url, options = {}) {
@@ -385,7 +408,7 @@ async function operator(proxies, targetPlatform, context) {
   function persistSubUserinfo(subscribeUrl) {
     updateStoredSubscriptions((sub) => {
       if (sub.subUserinfo && !isAutoSubUserinfo(sub.subUserinfo)) return false;
-      const nextValue = buildSubUserinfoUrl(subscribeUrl, config.headers);
+      const nextValue = buildSubUserinfoUrl(subscribeUrl, activeSubscriptionHeaders);
       if (sub.subUserinfo === nextValue) return false;
       sub.subUserinfo = nextValue;
       return true;
