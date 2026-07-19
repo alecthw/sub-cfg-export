@@ -48,7 +48,8 @@ test('globalcloud exports complete YAML without decrypt block', async ({ page })
   const providerScript = await scriptResponse.text()
   expect(providerScript).toContain('async function operator')
   expect(providerScript).toContain('decryptOssConfig')
-  expect(providerScript).toContain('searchParams.set("flag", "clash")')
+  expect(providerScript).not.toContain('searchParams.set("flag"')
+  expect(providerScript).toContain('decryptAesBase64(content, config.decrypt)')
   expect(providerScript).not.toContain('SUBSCRIPTION_USER_AGENT')
   expect(yaml).toBe(
     [
@@ -71,6 +72,85 @@ test('globalcloud exports complete YAML without decrypt block', async ({ page })
   await expect(page.getByText('点击或拖入客户端安装包')).toBeVisible()
 })
 
+test('provider downloads only the original URL with the configured User-Agent', async ({ page }) => {
+  const scriptResponse = await page.request.get('/provider-api-subscription.js')
+  const script = await scriptResponse.text()
+  const outcome = await page.evaluate(async (source) => {
+    const scope = globalThis as any
+    const subscriptionRequests: Array<{ url: string; headers: Record<string, string> }> = []
+    scope.$arguments = { noCache: true }
+    scope.$options = {}
+    scope.yaml = {
+      parse: () => ({
+        cfgUrls: ['https://config.example.com/config.json'],
+        username: 'test@example.com',
+        password: 'test-password',
+        headers: { 'User-Agent': 'UnitTest/v1.0 clash-verge Platform/windows' },
+        decrypt: null,
+      }),
+    }
+    scope.b64d = (value: string) => atob(value)
+    scope.$substore = {
+      env: { isNode: false },
+      read: (key: string) => (key === 'settings' ? {} : ''),
+      write: () => undefined,
+      info: () => undefined,
+      error: () => undefined,
+      http: {
+        get: async ({
+          url,
+          headers = {},
+        }: {
+          url: string
+          headers?: Record<string, string>
+        }) => {
+          if (url.includes('config.example.com')) {
+            return {
+              statusCode: 200,
+              body: btoa(JSON.stringify({ hosts: ['https://api.example.com'] })),
+            }
+          }
+          if (url.includes('/user/getSubscribe')) {
+            return {
+              statusCode: 200,
+              body: JSON.stringify({
+                data: {
+                  subscribe_url:
+                    'https://subscribe.example.com/api/v1/client/subscribe?token=test',
+                },
+              }),
+            }
+          }
+          subscriptionRequests.push({ url, headers })
+          return { statusCode: 200, body: 'node-ok' }
+        },
+        post: async () => ({
+          statusCode: 200,
+          body: JSON.stringify({ data: { auth_data: 'test-auth' } }),
+        }),
+      },
+    }
+    scope.ProxyUtils = {
+      parse: (content: string) => (content === 'node-ok' ? [{ name: 'node' }] : []),
+    }
+    ;(0, eval)(`${source}\nglobalThis.__providerOperator = operator;`)
+    const nodes = await scope.__providerOperator([], '', { raw: 'ignored' })
+    return {
+      nodeCount: nodes.length,
+      requestCount: subscriptionRequests.length,
+      hasFlag: new URL(subscriptionRequests[0].url).searchParams.has('flag'),
+      userAgent: subscriptionRequests[0].headers['User-Agent'],
+    }
+  }, script)
+
+  expect(outcome).toEqual({
+    nodeCount: 1,
+    requestCount: 1,
+    hasFlag: false,
+    userAgent: 'UnitTest/v1.0 clash-verge Platform/windows',
+  })
+})
+
 test('xmtz restores XOR URLs and decrypt values', async ({ page }) => {
   await openApp(page)
   const yaml = await selectInstaller(page, 'xmtzapp-lite.exe')
@@ -79,8 +159,8 @@ test('xmtz restores XOR URLs and decrypt values', async ({ page }) => {
   expect(yaml).toContain('https://cdno01.llguanglisf.com/saos/xmtz_news.json')
   expect(yaml).toContain('https://ocdn01.llguangli25o.com:59991/saos/xmtz_news.json')
   expect(yaml).toContain('User-Agent: NetFlow/v3.0.6 clash-verge Platform/windows')
-  expect(yaml).toContain('key: 10b78659c06ec08a')
-  expect(yaml).toContain('iv: e8be417610d21adc')
+  expect(yaml).toContain('key: c8c1dac7d3fff76b')
+  expect(yaml).toContain('iv: c705c9b7f56412d8')
 })
 
 test('xjkp restores URLs and verified decrypt values', async ({ page }) => {

@@ -1,4 +1,4 @@
-import type { DecryptInfo, ExtractedInfo } from '../types'
+import type { DecryptInfo, ExtractedInfo, SubscriptionDecryptInfo } from '../types'
 
 const URL_JSON_RE =
   /https?:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?\/[A-Za-z0-9._~!$&()*+,;=:@%/+\-]*?\.json/gi
@@ -255,17 +255,22 @@ function parseSmallIntegerRefs(
 function decodeSmiArrays(
   data: Uint8Array,
   snapshot: SnapshotInfo,
-): { urls: PositionedValue[]; hexValues: PositionedValue[] } {
+): {
+  urls: PositionedValue[]
+  hexValues: PositionedValue[]
+  obfuscatedHexValues: PositionedValue[]
+} {
   let refValues: Map<number, number>
   let scanStart: number
   try {
     ;[refValues, scanStart] = parseSmallIntegerRefs(data, snapshot)
   } catch {
-    return { urls: [], hexValues: [] }
+    return { urls: [], hexValues: [], obfuscatedHexValues: [] }
   }
 
   const urls: PositionedValue[] = []
   const hexValues: PositionedValue[] = []
+  const obfuscatedHexValues: PositionedValue[] = []
   const end = snapshot.end
 
   for (let candidatePos = scanStart; candidatePos < end - 12; candidatePos += 1) {
@@ -322,15 +327,30 @@ function decodeSmiArrays(
       if (HEX16_RE.test(text) && text.toLowerCase() !== '0123456789abcdef') {
         hexValues.push({ pos: candidatePos, value: text.toLowerCase() })
       }
+
+      const decodedCandidates: string[] = []
+      for (let mask = 1; mask <= 0xff; mask += 1) {
+        const decoded = new Uint8Array(values.length)
+        for (let index = 0; index < values.length; index += 1) {
+          decoded[index] = values[index] ^ mask
+        }
+        const decodedText = textDecoder.decode(decoded)
+        if (HEX16_RE.test(decodedText)) decodedCandidates.push(decodedText.toLowerCase())
+      }
+      const decodedHexValues = unique(decodedCandidates)
+      if (decodedHexValues.length === 1) {
+        obfuscatedHexValues.push({ pos: candidatePos, value: decodedHexValues[0] })
+      }
     }
   }
 
-  return { urls, hexValues }
+  return { urls, hexValues, obfuscatedHexValues }
 }
 
 function selectSnapshotInfo(data: Uint8Array): {
   urls: PositionedValue[]
   hexValues: PositionedValue[]
+  obfuscatedHexValues: PositionedValue[]
 } {
   const snapshots = snapshotCandidates(data).sort(
     (left, right) =>
@@ -341,7 +361,7 @@ function selectSnapshotInfo(data: Uint8Array): {
     const result = decodeSmiArrays(data, snapshot)
     if (result.urls.length > 0) return result
   }
-  return { urls: [], hexValues: [] }
+  return { urls: [], hexValues: [], obfuscatedHexValues: [] }
 }
 
 function basename(url: string): string {
@@ -420,18 +440,29 @@ function selectDecryptValues(
   dartUrls: PositionedValue[],
   hexValues: PositionedValue[],
 ): DecryptInfo | null {
-  const liteFamily =
-    selectedUrls.length === 4 &&
-    selectedUrls.every((url) => /\/saos\/(?:xjkp|xmtz)_news\.json$/i.test(new URL(url).pathname))
-  if (liteFamily) {
-    return { key: '10b78659c06ec08a', iv: 'e8be417610d21adc' }
-  }
-
   const selectedSet = new Set(selectedUrls)
   const positions = dartUrls
     .filter((item) => selectedSet.has(item.value))
     .map((item) => item.pos)
   if (positions.length === 0) return null
+
+  const liteFamily =
+    selectedUrls.length === 4 &&
+    selectedUrls.every((url) => /\/saos\/(?:xjkp|xmtz)_news\.json$/i.test(new URL(url).pathname))
+  if (liteFamily) {
+    const lastUrlPos = Math.max(...positions)
+    const nearby = hexValues
+      .filter(
+        (item) =>
+          item.pos - lastUrlPos > 0 &&
+          item.pos - lastUrlPos <= 64 * 1024,
+      )
+      .sort((left, right) => left.pos - right.pos)
+    const iv = nearby[0]?.value
+    const key = nearby[1]?.value
+    if (!iv || !key || iv === key) return null
+    return { key, iv }
+  }
 
   const firstUrlPos = Math.min(...positions)
   const nearby = hexValues
@@ -443,6 +474,14 @@ function selectDecryptValues(
   const key = nearby.at(-1)?.value
   if (!iv || !key || iv === key) return null
   return { key, iv }
+}
+
+function selectSubscriptionDecrypt(
+  obfuscatedHexValues: PositionedValue[],
+): SubscriptionDecryptInfo | null {
+  const passwords = unique(obfuscatedHexValues.map((item) => item.value))
+  if (passwords.length !== 1) return null
+  return { type: 'aes-256-gcm', password: passwords[0] }
 }
 
 function extractProductVersion(installer: Uint8Array): string | null {
@@ -493,15 +532,21 @@ export function renderYaml(info: ExtractedInfo): string {
   } else {
     lines.push('decrypt: null')
   }
+  if (info.subscriptionDecrypt) {
+    lines.push('subscriptionDecrypt:')
+    lines.push(`  type: ${info.subscriptionDecrypt.type}`)
+    lines.push(`  password: ${yamlScalar(info.subscriptionDecrypt.password)}`)
+  }
   return `${lines.join('\n')}\n`
 }
 
 export function extractInfo(installer: Uint8Array, payload: Uint8Array): ExtractedInfo {
   const rawUrls = extractJsonUrls(installer)
   const payloadUrls = extractJsonUrls(payload)
-  const { urls: dartUrls, hexValues } = selectSnapshotInfo(payload)
+  const { urls: dartUrls, hexValues, obfuscatedHexValues } = selectSnapshotInfo(payload)
   const cfgUrls = selectConfigUrls(unique([...rawUrls, ...payloadUrls]), dartUrls)
   const decrypt = selectDecryptValues(cfgUrls, dartUrls, hexValues)
+  const subscriptionDecrypt = selectSubscriptionDecrypt(obfuscatedHexValues)
   const userAgent = extractUserAgent(installer, payload)
-  return { cfgUrls, userAgent, decrypt }
+  return { cfgUrls, userAgent, decrypt, subscriptionDecrypt }
 }

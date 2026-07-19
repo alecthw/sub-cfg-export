@@ -18,10 +18,16 @@ export interface DecryptInfo {
   iv: string
 }
 
+export interface SubscriptionDecryptInfo {
+  type: 'aes-256-gcm'
+  password: string
+}
+
 export interface ExtractedInfo {
   cfgUrls: string[]
   userAgent: string
   decrypt: DecryptInfo | null
+  subscriptionDecrypt: SubscriptionDecryptInfo | null
 }
 
 export interface ExtractionStats {

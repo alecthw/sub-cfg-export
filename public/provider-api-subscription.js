@@ -16,10 +16,17 @@
  * headers:
  *   User-Agent: NetFlow/v3.0.6 clash-verge Platform/linux
  * decrypt: null
+ * subscriptionDecrypt:
+ *   type: aes-256-gcm
+ *   password: example-password
  */
 
 async function operator(proxies, targetPlatform, context) {
   const CFG_USER_AGENT = "Mozilla/5.0 (dart:io) SuperAccelerator";
+  const DEFAULT_SUBSCRIPTION_DECRYPT = Object.freeze({
+    type: "aes-256-gcm",
+    password: "86f2e72ead6e985e",
+  });
   const CACHE_PREFIX = "provider-api-subscription:";
   const SUBSCRIBE_URL_CACHE_PREFIX =
     "#sub-store-cached-provider-script-subscribe-url-";
@@ -33,9 +40,6 @@ async function operator(proxies, targetPlatform, context) {
   const activeSubscriptionHeaders = config.headers;
   const configHash = getHash(stableStringify(config));
   const subscribeUrlCacheKey = `${SUBSCRIBE_URL_CACHE_PREFIX}${configHash}`;
-  const noCache = isEnabled(
-    $arguments?.noCache ?? $options?.noCache ?? $options?._req?.query?.noCache
-  );
   const settings = $substore.read("settings") || {};
   const timeout = positiveNumber($arguments?.timeout)
     ? Number($arguments.timeout)
@@ -47,11 +51,29 @@ async function operator(proxies, targetPlatform, context) {
 
   const fetchAndParse = async (subscribeUrl) => {
     let lastError;
-    for (const requestUrl of subscriptionUrlVariants(subscribeUrl)) {
-      for (const strategy of subscriptionStrategies()) {
+    const requestUrl = normalizeString(subscribeUrl).split("#")[0].trim();
+    try {
+      const content = await fetchSubscriptionContent(requestUrl);
+      const candidates = [content];
+      if (config.decrypt) {
         try {
-          const content = await fetchSubscriptionContent(requestUrl, strategy);
-          const parsed = ProxyUtils.parse(content);
+          candidates.push(decryptAesBase64(content, config.decrypt));
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (config.subscriptionDecrypt) {
+        try {
+          candidates.push(
+            decryptSubscriptionContent(content, config.subscriptionDecrypt)
+          );
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      for (const candidate of candidates) {
+        try {
+          const parsed = ProxyUtils.parse(candidate);
           if (!Array.isArray(parsed) || parsed.length === 0) {
             throw new Error("provider API 订阅未解析到有效节点");
           }
@@ -60,6 +82,8 @@ async function operator(proxies, targetPlatform, context) {
           lastError = error;
         }
       }
+    } catch (error) {
+      lastError = error;
     }
     throw lastError || new Error("provider API 订阅未解析到有效节点");
   };
@@ -183,6 +207,9 @@ async function operator(proxies, targetPlatform, context) {
       password: normalizeString(value.password),
       headers: normalizeHeaders(value.headers),
       decrypt: normalizeDecrypt(value.decrypt),
+      subscriptionDecrypt: normalizeSubscriptionDecrypt(
+        value.subscriptionDecrypt
+      ) || DEFAULT_SUBSCRIPTION_DECRYPT,
     };
   }
 
@@ -195,6 +222,22 @@ async function operator(proxies, targetPlatform, context) {
       key: normalizeString(decrypt.key),
       iv: normalizeString(decrypt.iv),
     };
+  }
+
+  function normalizeSubscriptionDecrypt(decrypt) {
+    if (decrypt == null) return null;
+    if (typeof decrypt !== "object" || Array.isArray(decrypt)) {
+      throw new Error("provider 参数 subscriptionDecrypt 必须为 null 或对象");
+    }
+    const type = normalizeString(decrypt.type).trim().toLowerCase();
+    const password = normalizeString(decrypt.password).trim();
+    if (type !== "aes-256-gcm") {
+      throw new Error("provider 参数 subscriptionDecrypt.type 仅支持 aes-256-gcm");
+    }
+    if (!password) {
+      throw new Error("provider 参数 subscriptionDecrypt.password 不能为空");
+    }
+    return { type, password };
   }
 
   async function fetchBaseURLs() {
@@ -277,57 +320,41 @@ async function operator(proxies, targetPlatform, context) {
     return { subscribeUrl, token };
   }
 
-  function subscriptionUrlVariants(value) {
-    const original = normalizeString(value).split("#")[0].trim();
-    try {
-      const url = new URL(original);
-      if (url.protocol !== "http:" && url.protocol !== "https:") {
-        return [original];
-      }
-      const clashUrl = new URL(url);
-      clashUrl.searchParams.set("flag", "clash");
-      return unique([clashUrl.toString(), original]);
-    } catch (error) {
-      return [original];
-    }
-  }
-
-  function subscriptionStrategies() {
-    const configured = { headers: config.headers, decrypt: null };
-    if (!config.decrypt) return [configured];
-    return [{ headers: config.headers, decrypt: config.decrypt }, configured];
-  }
-
-  async function fetchSubscriptionContent(subscribeUrl, strategy) {
-    if (strategy.decrypt) {
-      const response = await request("get", subscribeUrl, {
-        headers: strategy.headers,
-        encoding: null,
-      });
-      return decryptAesBase64(response.body, strategy.decrypt);
-    }
-
-    const requestUrl = buildDownloadUrl(subscribeUrl, strategy.headers);
-    const downloaded = await ProxyUtils.download(
-      requestUrl,
-      undefined,
-      timeout,
-      proxy,
-      undefined,
-      undefined,
-      noCache,
-      true,
-      { returnRaw: true }
-    );
-    const content = downloaded?.result ?? downloaded;
-    if (!normalizeString(content).trim()) {
-      throw new Error("provider API 订阅内容为空");
-    }
-    return normalizeString(content);
+  async function fetchSubscriptionContent(subscribeUrl) {
+    const response = await request("get", subscribeUrl, {
+      headers: config.headers,
+      encoding: null,
+    });
+    const content = bodyToText(response.body);
+    if (!content.trim()) throw new Error("provider API 订阅内容为空");
+    return content;
   }
 
   function decryptOssConfig(body, decrypt) {
     return decryptAesBase64(body, decrypt);
+  }
+
+  function decryptSubscriptionContent(body, decrypt) {
+    if (!$substore.env?.isNode || typeof require !== "function") {
+      throw new Error("订阅 AES-GCM 解密仅支持运行在 Node.js 后端的 Sub-Store");
+    }
+    const crypto = require("crypto");
+    const encrypted = Buffer.from(normalizeBase64(bodyToText(body)), "base64");
+    if (encrypted.length <= 28) {
+      throw new Error("AES-GCM 订阅密文长度无效");
+    }
+    const nonce = encrypted.subarray(0, 12);
+    const tag = encrypted.subarray(encrypted.length - 16);
+    const ciphertext = encrypted.subarray(12, encrypted.length - 16);
+    const key = crypto
+      .createHash("sha256")
+      .update(Buffer.from(decrypt.password, "utf8"))
+      .digest();
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, nonce);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString(
+      "utf8"
+    );
   }
 
   function decryptAesBase64(body, decrypt) {
@@ -362,6 +389,19 @@ async function operator(proxies, targetPlatform, context) {
       .replace(/_/g, "/");
   }
 
+  function bodyToText(value) {
+    if ($substore.env?.isNode && typeof Buffer !== "undefined") {
+      if (
+        Buffer.isBuffer(value) ||
+        value instanceof ArrayBuffer ||
+        ArrayBuffer.isView(value)
+      ) {
+        return toBuffer(value).toString("utf8");
+      }
+    }
+    return normalizeString(value);
+  }
+
   async function request(method, url, options = {}) {
     const requestOptions = {
       url,
@@ -383,10 +423,6 @@ async function operator(proxies, targetPlatform, context) {
     if ($substore.env?.isLoon) options.node = selectedProxy;
     if ($substore.env?.isQX) options.opts = { policy: selectedProxy };
     return options;
-  }
-
-  function buildDownloadUrl(url, headers) {
-    return buildUrlArguments(url, headers);
   }
 
   function buildSubUserinfoUrl(url, headers) {
@@ -546,11 +582,6 @@ async function operator(proxies, targetPlatform, context) {
   function positiveNumber(value) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0;
-  }
-
-  function isEnabled(value) {
-    if (value === true || value === 1) return true;
-    return /^(1|true|yes|on)$/i.test(normalizeString(value).trim());
   }
 
   function unique(values) {
