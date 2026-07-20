@@ -1,0 +1,19 @@
+{
+  "name": "在 Sub-Store 中获取封端机场订阅节点",
+  "short_name": "封端机场订阅",
+  "description": "在浏览器本地提取 Nextin 系客户端配置并通过 Sub-Store 获取订阅节点。",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#2357d9",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
