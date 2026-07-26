@@ -54,6 +54,24 @@ interface IssuePrompt {
   message: string
 }
 
+function AffiliateAnnouncement({ duplicate = false }: { duplicate?: boolean }) {
+  return (
+    <div className="affiliate-marquee-item" aria-hidden={duplicate || undefined}>
+      <span>招机场AFF广告，详细联系</span>
+      <a
+        href="https://t.me/alecthw"
+        target="_blank"
+        rel="noopener noreferrer"
+        tabIndex={duplicate ? -1 : undefined}
+        aria-label="通过 Telegram 联系 alecthw"
+      >
+        <TelegramFilled aria-hidden />
+        <span>https://t.me/alecthw</span>
+      </a>
+    </div>
+  )
+}
+
 const STAGE_INDEX: Record<ExtractionStage, number> = {
   idle: 0,
   reading: 0,
@@ -384,6 +402,13 @@ export default function App() {
           {issuePrompt && <Text type="secondary">文件名：{issuePrompt.fileName}</Text>}
         </div>
       </Modal>
+
+      <aside className="affiliate-marquee" aria-label="AFF 广告公告">
+        <div className="affiliate-marquee-track">
+          <AffiliateAnnouncement />
+          <AffiliateAnnouncement duplicate />
+        </div>
+      </aside>
 
       <main className="app-shell">
       <section className="hero">
