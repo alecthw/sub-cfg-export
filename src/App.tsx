@@ -57,7 +57,7 @@ interface IssuePrompt {
 function AffiliateAnnouncement({ duplicate = false }: { duplicate?: boolean }) {
   return (
     <div className="affiliate-marquee-item" aria-hidden={duplicate || undefined}>
-      <span>招机场AFF广告，详细联系</span>
+      <span>本站接收机场置顶广告，详细联系</span>
       <a
         href="https://t.me/alecthw"
         target="_blank"
@@ -68,6 +68,7 @@ function AffiliateAnnouncement({ duplicate = false }: { duplicate?: boolean }) {
         <TelegramFilled aria-hidden />
         <span>https://t.me/alecthw</span>
       </a>
+      <span>。</span>
     </div>
   )
 }

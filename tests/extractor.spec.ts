@@ -262,6 +262,24 @@ test('hero exposes GitHub and Sub-Store project links', async ({ page }) => {
   await expect(telegramLink).toHaveAttribute('rel', 'noopener noreferrer')
 })
 
+test('keeps the affiliate banner fixed with a Telegram contact link', async ({ page }) => {
+  await openApp(page)
+
+  const banner = page.getByRole('region', { name: 'AFF 广告公告' })
+  await expect(banner).toBeVisible()
+  await expect(banner.locator('.affiliate-marquee-item').first()).toContainText(
+    '本站接收机场置顶广告，详细联系https://t.me/alecthw。',
+  )
+
+  const telegramLink = banner.getByRole('link', { name: '通过 Telegram 联系 alecthw' })
+  await expect(telegramLink).toHaveAttribute('href', 'https://t.me/alecthw')
+  await expect(telegramLink).toHaveAttribute('target', '_blank')
+  await expect(telegramLink).toHaveAttribute('rel', 'noopener noreferrer')
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
+  await expect.poll(async () => (await banner.boundingBox())?.y).toBe(0)
+})
+
 test('requires disclaimer acceptance only on the first visit', async ({ page }) => {
   await page.goto('/')
   const dialog = page.getByRole('dialog', { name: '免责声明与使用须知' })

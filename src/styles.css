@@ -19,6 +19,7 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
+  padding-top: 43px;
   background:
     radial-gradient(circle at 8% 0%, rgba(72, 118, 255, 0.08), transparent 30rem),
     #f4f7fb;
@@ -31,8 +32,10 @@ textarea {
 }
 
 .affiliate-marquee {
-  position: relative;
+  position: fixed;
   z-index: 20;
+  top: 0;
+  left: 0;
   width: 100%;
   overflow: hidden;
   color: #fff;
@@ -633,6 +636,10 @@ footer {
 }
 
 @media (max-width: 560px) {
+  body {
+    padding-top: 39px;
+  }
+
   .affiliate-marquee::before,
   .affiliate-marquee::after {
     width: 18px;
