@@ -159,8 +159,8 @@ flowchart TD
         S5 --> S6["Base64 解码全部密文字节"]
         S6 --> S7["前 12 字节 = nonce<br/>末 16 字节 = authentication tag<br/>中间字节 = ciphertext"]
         S7 --> S8["SHA-256(UTF-8 password) 得到 32 字节 AES key"]
-        S8 --> S9["AES-256-GCM 解密<br/>设置 tag，不使用 AAD"]
-        S9 --> S10{"Node crypto 可用，且 tag 校验与 UTF-8 输出成功？"}
+        S8 --> S9["按 Node crypto → WebCrypto → 纯 JavaScript 顺序尝试 AES-256-GCM<br/>设置 tag，不使用 AAD"]
+        S9 --> S10{"任一后端完成 tag 校验并成功输出 UTF-8？"}
         S10 -- "是" --> S11["将 GCM 明文加入候选列表"]
         S10 -- "否" --> S12["不加入 GCM 候选"]
         S11 --> P0["按原文、CBC、GCM 顺序调用 ProxyUtils.parse"]
@@ -179,7 +179,7 @@ flowchart TD
 - `decrypt.key` / `decrypt.iv` 使用 **AES-128-CBC**，既可解密加密的 `cfgUrl` 配置，也可生成最终订阅的 CBC 解密候选。两者虽然通常长得像 16 位十六进制字符串，代码实际按 UTF-8 字符串取 16 字节，并非按 hex 转换成 8 字节。
 - `subscriptionDecrypt.password` 使用 **AES-256-GCM**，只用于最终订阅。密文布局为 `Base64(nonce[12] + ciphertext + tag[16])`，密钥为 `SHA-256(UTF-8(password))`，不使用 AAD。未输出该字段时，脚本会使用内置口令 `86f2e72ead6e985e` 作为兼容回退。
 - 每种解密失败只会丢弃对应候选；原文、CBC 和 GCM 候选按顺序独立交给 `ProxyUtils.parse()`，其中任一候选解析出非空节点数组即成功。
-- CBC 与 GCM 均通过 Node.js `crypto` 实现，因此需要运行在 Node.js 后端版 Sub-Store；非 Node.js 运行环境仍可尝试解析无需解密的原始订阅内容。
+- CBC 与 GCM 均按 **Node.js `crypto` → 原生 WebCrypto → `asmcrypto.js` 纯 JavaScript** 的优先级执行。Surge、Loon、Quantumult X、Stash、Shadowrocket 等非 Node Sub-Store 即使没有原生密码 API，也可使用随脚本打包的纯 JavaScript 回退。
 
 ## 技术方案
 
@@ -187,9 +187,12 @@ flowchart TD
 - Vite 8 + TypeScript 7
 - Web Worker 内解析，避免阻塞页面
 - `node-liblzma` 提供非线程 liblzma WebAssembly
+- `asmcrypto.js` 提供 Sub-Store 非 Node 环境的 AES-CBC、AES-GCM 与 SHA-256 回退
 - File API 本地读取，Blob API 下载 YAML
 
 Inno Setup 内保存的是 raw LZMA2 数据。解析器先读取 LZMA2 chunk 边界与解压大小，再在内存中补成最小 XZ 容器，交给 liblzma WASM 流式解压。liblzma 源码不复制进本项目，由 npm 依赖管理。
+
+`provider-api-subscription.js` 的源码位于 `scripts/`。`npm run build:provider` 会将所需密码模块打包到单个 `public/provider-api-subscription.js`，因此 Sub-Store 仍只需加载原有脚本 URL，不依赖动态 `import()` 或额外 CDN。
 
 ## 本地开发
 
@@ -205,6 +208,12 @@ npm run dev
 ```bash
 npm run build
 npm run preview
+```
+
+跨 Sub-Store 运行时解密测试：
+
+```bash
+npm run test:provider
 ```
 
 真实样本端到端测试：

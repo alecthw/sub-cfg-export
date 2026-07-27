@@ -9,3 +9,12 @@
 - Installed version: see `package-lock.json`
 
 The project consumes the published npm package and its WebAssembly artifact without vendoring or modifying liblzma source code. Corresponding upstream source and license materials are available from the links above and from the exact package version recorded in `package-lock.json`.
+
+## asmcrypto.js
+
+- Package: `asmcrypto.js`
+- Upstream: https://github.com/asmcrypto/asmcrypto.js
+- License: MIT
+- Installed version: see `package-lock.json`
+
+Only the AES-CBC, AES-GCM, and SHA-256 modules are bundled into the generated Sub-Store provider script. They provide the pure JavaScript decryption fallback for Surge, Loon, Quantumult X, Stash, Shadowrocket, and other non-Node runtimes.
