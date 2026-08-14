@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://alecthw.github.io/sub-cfg-export/sitemap.xml
