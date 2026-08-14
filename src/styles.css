@@ -133,6 +133,27 @@ textarea {
   letter-spacing: 0.08em;
 }
 
+.affiliate-marquee-offer {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 224, 137, 0.42);
+  border-radius: 6px;
+  color: #fff1b8;
+  background: rgba(255, 197, 61, 0.14);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.affiliate-marquee-offer code {
+  color: #fff;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .affiliate-marquee-separator {
   flex: none;
   color: rgba(255, 255, 255, 0.48);
@@ -688,6 +709,16 @@ footer {
     padding: 0 5px;
     font-size: 9px;
     line-height: 15px;
+  }
+
+  .affiliate-marquee-offer {
+    gap: 3px;
+    padding: 1px 5px;
+    font-size: 10px;
+  }
+
+  .affiliate-marquee-offer code {
+    font-size: 10px;
   }
 
   .affiliate-marquee-action {

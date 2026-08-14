@@ -57,12 +57,16 @@ interface IssuePrompt {
 const AFFILIATE_ADS = [
   {
     name: '云图机场',
+    offerLabel: '本站专属75折优惠码',
+    promoCode: 'uufly',
     description:
       '全程金融级跨境专线，三网双程优化，节点倍率统一 1 倍，主流地区精耕细作，晚高峰依然低延迟、零丢包。',
     url: 'https://vip.ytjcok.org/#/register?code=dyGofOZw',
   },
   {
     name: '寰宇云机场',
+    offerLabel: '85折优惠码',
+    promoCode: 'HY888',
     description:
       '八年行业经验的海外团队打造，直连 + 专线混合线路；套餐流量额度大方，流媒体与 AI 解锁齐全，全平台开箱即用。',
     url: 'http://hyy.52kok.cn/#/register?code=nzwnfjmd',
@@ -79,11 +83,15 @@ function AffiliateAnnouncements({ duplicate = false }: { duplicate?: boolean }) 
           target="_blank"
           rel="noopener noreferrer"
           tabIndex={duplicate ? -1 : undefined}
-          aria-label={`访问 ${ad.name} 注册页面（新标签页打开）`}
+          aria-label={`${ad.name}，${ad.offerLabel} ${ad.promoCode}；访问注册页面（新标签页打开）`}
           key={ad.name}
         >
           <span className="affiliate-marquee-badge">AFF</span>
           <strong>{ad.name}</strong>
+          <span className="affiliate-marquee-offer">
+            {ad.offerLabel}
+            <code>{ad.promoCode}</code>
+          </span>
           <span className="affiliate-marquee-separator" aria-hidden>·</span>
           <span className="affiliate-marquee-description">{ad.description}</span>
           <span className="affiliate-marquee-action">立即了解 ↗</span>
