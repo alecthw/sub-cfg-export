@@ -5,3 +5,4 @@ playwright-report/
 *.exe
 *.yaml
 .DS_Store
+__pycache__/

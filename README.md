@@ -32,6 +32,18 @@ subscriptionDecrypt:
 decrypt: null
 ```
 
+## Apex 新版（xmtz / xjkp speed）
+
+已适配本目录中的 `xmtzapp-speed.exe`（7.1.1）与 `xjkpapp-speed.exe`（7.2.5）。新版会额外导出 `apex` 对象，包含 XOR 密钥、配置与订阅验签公钥、订阅 AES 密钥，以及 OSS / API / subscription 三类客户端证书。所有参数分别从各自安装包提取，导出的账号密码留空。YAML 中的证书私钥用于后端 mTLS，请将配置保存到自己的 Sub-Store 本地订阅中。
+
+新版必须同时更新导出的 YAML 和 `provider-api-subscription.js`，在 Node.js Sub-Store 后端运行。Surge、Loon 等运行时缺少所需的 mTLS 传输接口，会明确提示环境不支持。旧版配置继续走原来的兼容分支。
+
+新版链路为：多段 LZMA2 文件清单 → 按大小与 SHA-256 定位 `data/app.so` → Dart 常量池提取 → OSS mTLS 获取配置 → XOR/Base64 解包与 Ed25519 验签 → 按远程映射登录及取得订阅令牌 → 替换旧订阅域名、使用新版路径并附加 `flag=apex` → subscription mTLS 下载二进制 APXS v2 → 验签和 AES-GCM 认证 → `ProxyUtils.parse`。UA 使用安装包应用标识和版本，例如 `ua.net.xmtzclient.app.apex/v7.1.1`。
+
+配置和 API 保持服务端 TLS 校验；按订阅兼容要求，仅订阅下载忽略服务端证书校验。请求不自动跟随重定向，避免携带客户端证书或认证信息跳转到未确认地址。代理请求使用 Sub-Store 后端安装的 `undici`，SOCKS 还需要 `fetch-socks`。
+
+分析证据、协议布局和验证范围见 [Apex 协议适配说明](docs/apex-protocol.md)。下文流程图描述旧版协议。
+
 ## 完整调用与解密流程
 
 ### 1. 从安装包到 Sub-Store 节点
@@ -53,7 +65,7 @@ flowchart TD
     J1 -- "否" --> J3["使用默认值 NetFlow/v2.2.4 clash-verge Platform/windows"]
     J2 --> K["按 URL 邻近关系提取 AES-128-CBC key / iv"]
     J3 --> K
-    K --> L["识别异或混淆的订阅 AES-GCM password"]
+    K --> L["识别异或或分段混淆的订阅 AES-GCM password"]
     L --> M["生成完整 YAML"]
     M --> N["用户填写 username / password"]
     N --> O["粘贴为 Sub-Store 本地订阅"]
@@ -103,9 +115,9 @@ flowchart TD
     Q --> R["规范化为 API base URL 列表"]
 
     R --> S["取下一个 API base URL"]
-    S --> T["POST /passport/auth/login<br/>账号密码 + YAML User-Agent"]
+    S --> T["POST /passport/auth/login<br/>账号密码 + 固定 API User-Agent"]
     T --> U{"是否取得 auth_data？"}
-    U -- "是" --> V["GET /user/getSubscribe<br/>Authorization + YAML User-Agent"]
+    U -- "是" --> V["GET /user/getSubscribe<br/>Authorization + 固定 API User-Agent"]
     V --> W{"是否取得 subscribe_url 或 token？"}
     W -- "是" --> X["生成并去重候选 URL<br/>subscribe_url 优先；token 与所有 API host 组合回退 URL"]
     X --> Y["取下一个候选 URL"]
@@ -124,7 +136,11 @@ flowchart TD
     AE -- "否" --> ERR["抛出最终错误：所有 API 与 URL 均失败"]
 ```
 
-服务地址规范化规则为：已经以 `/api/v1` 结尾的地址直接使用；以 `/api` 结尾的地址依次尝试原地址和 `/api/v1`；其余地址追加 `/api/v1`。`token` 回退地址固定为 `API host/client/subscribe?token=...`。所有最终订阅请求均使用 YAML `headers` 中的 `User-Agent`，不会追加 `flag=clash-verge` 或 `flag=clash`。
+服务地址规范化规则为：已经以 `/api/v1` 结尾的地址直接使用；以 `/api` 结尾的地址依次尝试原地址和 `/api/v1`；其余地址追加 `/api/v1`。`token` 回退地址固定为 `API host/client/subscribe?token=...`。配置和认证 API 使用官方的 `Mozilla/5.0 (dart:io) SuperAccelerator`，与订阅下载 UA 分开。所有最终订阅请求均使用 YAML `headers` 中的 `User-Agent`，不会追加 `flag=clash-verge` 或 `flag=clash`。
+
+全部失败时，脚本会汇总各地址在登录、获取订阅地址和下载订阅阶段的错误，保留底层错误码，并对 URL 查询参数及账号密码脱敏，避免主地址的错误被最后一个备用地址的 401/403 覆盖。
+
+订阅下载（包括缓存 URL）及自动流量查询会忽略 TLS 证书校验，以兼容订阅 CDN 证书与发布域名不匹配的客户端。配置获取、登录和 `getSubscribe` API 请求仍校验证书。Node 使用 Sub-Store 的 `strictSSL: false`，其他运行时使用 `insecure: true`。
 
 ### 3. 配置与订阅解密分支
 
@@ -148,7 +164,11 @@ flowchart TD
 
     subgraph SUBSCRIPTION["最终订阅内容"]
         direction TB
-        S0["使用原始 URL + YAML headers 下载响应"] --> S1["候选列表加入原始响应文本"]
+        S0["使用原始 URL + YAML headers 下载响应"] --> SN0{"是否为 SN2 封装？"}
+        SN0 -- "是" --> SN1["检查过期秒数并读取账号 UUID"]
+        SN1 --> SN2["SHA-256(UTF-8(seed + UUID))<br/>AES-256-GCM 解密并校验 tag"]
+        SN2 --> SN3["仅将解密明文交给 ProxyUtils.parse；失败则尝试下一地址"]
+        SN0 -- "否" --> S1["候选列表加入原始响应文本"]
         S1 --> S2{"YAML decrypt 是否存在？"}
         S2 -- "是" --> S3["AES-128-CBC<br/>Base64 → AES 解密 → Base64 → UTF-8"]
         S3 --> S31{"CBC 解密成功？"}
@@ -163,8 +183,9 @@ flowchart TD
         S9 --> S10{"任一后端完成 tag 校验并成功输出 UTF-8？"}
         S10 -- "是" --> S11["将 GCM 明文加入候选列表"]
         S10 -- "否" --> S12["不加入 GCM 候选"]
-        S11 --> P0["按原文、CBC、GCM 顺序调用 ProxyUtils.parse"]
-        S12 --> P0
+        S11 --> SM["尝试镜像 Base64 字母表还原并加入解码候选"]
+        S12 --> SM
+        SM --> P0["按原文、CBC、GCM、镜像 Base64 顺序调用 ProxyUtils.parse"]
         P0 --> P1{"返回数组且节点数大于 0？"}
         P1 -- "是" --> OK["返回节点、缓存 URL、更新 subUserinfo"]
         P1 -- "否" --> NEXT["尝试下一内容候选；随后尝试下一 URL / API host"]
@@ -178,7 +199,8 @@ flowchart TD
 
 - `decrypt.key` / `decrypt.iv` 使用 **AES-128-CBC**，既可解密加密的 `cfgUrl` 配置，也可生成最终订阅的 CBC 解密候选。两者虽然通常长得像 16 位十六进制字符串，代码实际按 UTF-8 字符串取 16 字节，并非按 hex 转换成 8 字节。
 - `subscriptionDecrypt.password` 使用 **AES-256-GCM**，只用于最终订阅。密文布局为 `Base64(nonce[12] + ciphertext + tag[16])`，密钥为 `SHA-256(UTF-8(password))`，不使用 AAD。未输出该字段时，脚本会使用内置口令 `86f2e72ead6e985e` 作为兼容回退。
-- 每种解密失败只会丢弃对应候选；原文、CBC 和 GCM 候选按顺序独立交给 `ProxyUtils.parse()`，其中任一候选解析出非空节点数组即成功。
+- `SN2.<过期秒数>.<Base64 密文>` 使用 `SHA-256(UTF-8(seed + UUID))` 派生密钥，UUID 从 `getSubscribe` 读取。seed 优先使用 YAML 中提取出的 32 位小写十六进制口令，兼容旧 YAML 时回退到客户端 3.2.1 的 seed。密文布局与裸 GCM 相同；过期、缺少 UUID 或认证失败均明确报错。
+- 非 SN2 内容的每种解密失败只会丢弃对应候选；原文、CBC、GCM 和镜像 Base64 候选按顺序独立交给 `ProxyUtils.parse()`，其中任一候选解析出非空节点数组即成功。
 - CBC 与 GCM 均按 **Node.js `crypto` → 原生 WebCrypto → `asmcrypto.js` 纯 JavaScript** 的优先级执行。Surge、Loon、Quantumult X、Stash、Shadowrocket 等非 Node Sub-Store 即使没有原生密码 API，也可使用随脚本打包的纯 JavaScript 回退。
 
 ## 技术方案
@@ -216,6 +238,14 @@ npm run preview
 npm run test:provider
 ```
 
+解析器回归测试（无需 EXE 样本，需要 Node.js 24 和 Python 3）：
+
+```bash
+npm run test:extractor
+```
+
+覆盖旧版与 Dart 3.13 Snapshot 布局、前导对象引用（包括整数 0）、XOR URL，以及 URL 前后两种 key/iv 排列，并校验浏览器与 Python 解析结果一致。
+
 真实样本端到端测试：
 
 ```bash
@@ -243,6 +273,9 @@ EXE 与生成的 YAML 已加入 `.gitignore`，不会被默认提交。
 ## 支持范围与安全限制
 
 - 当前支持包含 `zlb\x1a` Inno Setup raw LZMA2 数据块的兼容安装包。
+- 兼容小米梯子 3.2.1 使用的 Dart 3.13 对象标签及前导对象簇；key/iv 从样本读取，不固定使用旧密钥。
+- 小米梯子 3.2.1 的订阅 UA 为 `SecurityNet/v3.2.1 clash-verge Platform/windows`；32 字节订阅 seed 从安装包的三段混淆数组中提取。脚本支持 SN2、裸 GCM 和镜像 Base64，并将账号 UUID 与成功解析的订阅 URL 一同缓存。
+- 新版格式已通过合成密文及真实安装包导出回归；当前环境对真实订阅的下载仍返回 403/404/401，尚未完成真实节点的端到端验证，需继续核对官方客户端的请求与网络环境。
 - 输入仅接受 `.exe`，页面限制为 512 MiB。
 - 解压与扫描均在 Worker 中完成；浏览器内存不足时会返回错误，不会上传或回传安装包内容。
 - URL 仅选择 HTTP/HTTPS 的 JSON 地址；key/iv 仅在可确认的 Dart Snapshot 邻近数据中输出。

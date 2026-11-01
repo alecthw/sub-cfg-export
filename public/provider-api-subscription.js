@@ -1,5 +1,288 @@
 var ProviderApiSubscription = (function(exports) {
 	Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+	//#region scripts/apex-provider.js
+	async function runApexProvider({ config, runtime, timeout, proxy, sensitiveValues, errorMessage, cacheKey }) {
+		var _cfg$subscribe_domain;
+		const process = globalThis.process;
+		if (!(runtime === null || runtime === void 0 ? void 0 : runtime.loadModule) || !process) throw new Error("Apex 新版需要支持 Node.js 内置模块及 mTLS 的 Sub-Store 后端");
+		const { crypto, Buffer: B } = runtime;
+		const apex = config.apex;
+		const bytes = (v) => B.from(v, "base64");
+		const text = (v) => B.from(v).toString("utf8");
+		const maxBytes = 16777321;
+		const xor = (v) => {
+			const key = B.from(apex.xorKey, "utf8");
+			return B.from(bytes(v).map((byte, i) => byte ^ key[i % key.length]));
+		};
+		const publicKey = (v) => crypto.createPublicKey({
+			key: B.concat([B.from("302a300506032b6570032100", "hex"), bytes(v)]),
+			format: "der",
+			type: "spki"
+		});
+		function verify(key, prefix, payload, signature, label) {
+			if (signature.length !== 64 || !crypto.verify(null, B.concat([B.from(prefix), payload]), publicKey(key), signature)) throw new Error(`${label} Ed25519 签名校验失败`);
+		}
+		function unwrapURL(value) {
+			return value.startsWith("apex-url-v2:") ? text(xor(value.slice(12))) : value;
+		}
+		function httpsURL(value) {
+			const url = new URL(value);
+			if (url.protocol !== "https:" || url.username || url.password) throw new Error("Apex 仅允许 HTTPS 服务地址");
+			return url;
+		}
+		async function request(urlValue, purpose, { method = "GET", auth, body } = {}) {
+			var _Object$entries$find, _process$env, _process$env2, _process$env3, _process$env4;
+			const url = httpsURL(urlValue);
+			const bundle = apex.mtls[purpose];
+			const tls = {
+				cert: bundle.client_cert_pem,
+				key: bundle.client_key_pem,
+				rejectUnauthorized: purpose !== "subscription"
+			};
+			const headers = {
+				...config.headers,
+				"User-Agent": ((_Object$entries$find = Object.entries(config.headers).find(([name]) => name.toLowerCase() === "user-agent")) === null || _Object$entries$find === void 0 ? void 0 : _Object$entries$find[1]) || "Apex-SDK",
+				Accept: "*/*",
+				"Cache-Control": "no-cache",
+				...auth ? { Authorization: auth } : {},
+				...body ? { "Content-Type": "application/json" } : {}
+			};
+			const encoded = body ? JSON.stringify(body) : void 0;
+			let response;
+			const envProxy = ((_process$env = process.env) === null || _process$env === void 0 ? void 0 : _process$env.https_proxy) || ((_process$env2 = process.env) === null || _process$env2 === void 0 ? void 0 : _process$env2.HTTPS_PROXY) || ((_process$env3 = process.env) === null || _process$env3 === void 0 ? void 0 : _process$env3.all_proxy) || ((_process$env4 = process.env) === null || _process$env4 === void 0 ? void 0 : _process$env4.ALL_PROXY);
+			const selectedProxy = proxy || envProxy;
+			if (selectedProxy) {
+				const require = runtime.loadModule("module").createRequire(`${process.cwd()}/package.json`);
+				let undici;
+				try {
+					undici = require("undici");
+				} catch (_unused) {
+					throw new Error("Apex 代理请求需要 Sub-Store 后端安装 undici");
+				}
+				const options = {
+					connect: tls,
+					requestTls: tls
+				};
+				let dispatcher;
+				if (/^socks5h?:\/\//i.test(selectedProxy)) {
+					const { socksDispatcher } = require("fetch-socks");
+					const parsed = new URL(selectedProxy);
+					dispatcher = socksDispatcher({
+						type: 5,
+						host: parsed.hostname,
+						port: Number(parsed.port || 1080),
+						userId: decodeURIComponent(parsed.username),
+						password: decodeURIComponent(parsed.password)
+					}, options);
+				} else dispatcher = new undici.ProxyAgent({
+					...options,
+					uri: selectedProxy
+				});
+				const controller = new AbortController();
+				const timer = setTimeout(() => controller.abort(), timeout);
+				try {
+					const result = await undici.request(url, {
+						dispatcher,
+						method,
+						headers,
+						body: encoded,
+						signal: controller.signal,
+						headersTimeout: timeout,
+						bodyTimeout: timeout,
+						maxRedirections: 0
+					});
+					const chunks = [];
+					let length = 0;
+					for await (const chunk of result.body) {
+						length += chunk.length;
+						if (length > maxBytes) {
+							result.body.destroy();
+							throw new Error("Apex 响应超过大小限制");
+						}
+						chunks.push(B.from(chunk));
+					}
+					response = {
+						status: result.statusCode,
+						headers: result.headers,
+						body: B.concat(chunks)
+					};
+				} finally {
+					clearTimeout(timer);
+					await dispatcher.close();
+				}
+			} else {
+				const https = runtime.loadModule("https");
+				response = await new Promise((resolve, reject) => {
+					const req = https.request(url, {
+						...tls,
+						method,
+						headers,
+						agent: false
+					}, (res) => {
+						const chunks = [];
+						let length = 0;
+						res.on("data", (chunk) => {
+							length += chunk.length;
+							if (length > maxBytes) {
+								res.destroy(/* @__PURE__ */ new Error("Apex 响应超过大小限制"));
+								return;
+							}
+							chunks.push(B.from(chunk));
+						});
+						res.on("end", () => resolve({
+							status: res.statusCode,
+							headers: res.headers,
+							body: B.concat(chunks)
+						}));
+						res.on("error", reject);
+					});
+					const timer = setTimeout(() => req.destroy(/* @__PURE__ */ new Error("Apex 请求超时")), timeout);
+					req.on("close", () => clearTimeout(timer));
+					req.on("error", reject);
+					req.end(encoded);
+				});
+			}
+			if (response.status !== 200) {
+				const cloudflare = /Cloudflare/i.test(text(response.body.subarray(0, 2048))) ? "（Cloudflare 拦截）" : "";
+				throw new Error(`Apex ${purpose} HTTP ${response.status}${cloudflare}`);
+			}
+			return response;
+		}
+		function decodeConfig(body) {
+			const envelope = JSON.parse(text(xor(text(body).trim())));
+			if (envelope.format !== "apex-config-v1") throw new Error("Apex 配置封装格式无效");
+			const payload = bytes(envelope.payload);
+			verify(apex.configPublicKey, "apex-config-v1\0", payload, bytes(envelope.signature), "Apex 配置");
+			const cfg = JSON.parse(text(payload));
+			if (!Array.isArray(cfg.domains) || !cfg.domains.length) throw new Error("Apex 配置缺少 domains");
+			cfg.domains.forEach(httpsURL);
+			if (cfg.subscribe_domain != null && !Array.isArray(cfg.subscribe_domain)) throw new Error("Apex subscribe_domain 格式无效");
+			(cfg.subscribe_domain || []).forEach(httpsURL);
+			return cfg;
+		}
+		function decryptSubscription(body) {
+			if (body.length < 105 || body.length > maxBytes || text(body.subarray(0, 4)) !== "APXS" || body[4] !== 2) throw new Error("Apex APXS v2 订阅封装无效");
+			if (body.readUInt32BE(5) !== apex.profileId || body.readUInt32BE(9) !== apex.keyId) throw new Error("Apex APXS profile/key ID 不匹配");
+			verify(apex.subscriptionPublicKey, "apex-sub-sign-v2\0", body.subarray(0, -64), body.subarray(-64), "Apex 订阅");
+			const decipher = crypto.createDecipheriv("aes-256-gcm", bytes(apex.subscriptionKey), body.subarray(13, 25));
+			decipher.setAAD(B.concat([B.from("apex-sub-v2\0"), body.subarray(0, 25)]));
+			decipher.setAuthTag(body.subarray(-80, -64));
+			try {
+				return text(B.concat([decipher.update(body.subarray(25, -80)), decipher.final()]));
+			} catch (_unused2) {
+				throw new Error("Apex APXS AES-GCM 认证失败");
+			}
+		}
+		const failures = [];
+		let cfg;
+		for (const url of config.cfgUrls) try {
+			cfg = decodeConfig((await request(url, "oss")).body);
+			break;
+		} catch (error) {
+			failures.push(`配置 ${httpsURL(url).origin}: ${errorMessage(error)}`);
+		}
+		if (!cfg) throw new Error(`Apex 配置获取失败: ${failures.join("；")}`);
+		const path = (original) => {
+			var _cfg$subscribe_path;
+			if (cfg.enable_api_path_mapping !== true) return original;
+			const mapped = (_cfg$subscribe_path = cfg.subscribe_path) === null || _cfg$subscribe_path === void 0 ? void 0 : _cfg$subscribe_path[original];
+			if (typeof mapped !== "string" || !mapped.startsWith("/") || mapped.startsWith("//") || mapped.includes("#")) throw new Error(`Apex 配置缺少有效 API 路由: ${original}`);
+			return mapped;
+		};
+		const apiURL = (domain, original) => new URL(path(original), httpsURL(domain)).href;
+		const domains = [...new Set(cfg.domains)];
+		const subscriptionDomains = ((_cfg$subscribe_domain = cfg.subscribe_domain) === null || _cfg$subscribe_domain === void 0 ? void 0 : _cfg$subscribe_domain.length) ? cfg.subscribe_domain : domains;
+		const allowedOrigins = new Set([...domains, ...subscriptionDomains].map((v) => httpsURL(v).origin));
+		function subscriptionURLs(value, token) {
+			const urls = [];
+			if (value) {
+				const url = httpsURL(unwrapURL(value));
+				const original = "/api/v1/client/subscribe?token=";
+				if (`${url.pathname}?token=` === original && url.searchParams.has("token")) {
+					const mapped = new URL(path(original) + encodeURIComponent(url.searchParams.get("token")), url.origin);
+					for (const [name, val] of url.searchParams) if (name !== "token") mapped.searchParams.set(name, val);
+					if (allowedOrigins.has(mapped.origin)) urls.push(mapped);
+					else for (const domain of subscriptionDomains) urls.push(new URL(mapped.pathname + mapped.search, httpsURL(domain)));
+				} else if (allowedOrigins.has(url.origin)) urls.push(url);
+				else for (const domain of subscriptionDomains) urls.push(new URL(url.pathname + url.search, httpsURL(domain)));
+			}
+			if (token) for (const domain of subscriptionDomains) urls.push(new URL(path("/api/v1/client/subscribe?token=") + encodeURIComponent(token), httpsURL(domain)));
+			return [...new Set(urls.map((url) => {
+				if (!allowedOrigins.has(url.origin)) throw new Error("Apex 订阅地址不在已验签配置的服务域名中");
+				url.searchParams.set("flag", apex.flag);
+				url.hash = "";
+				return url.href;
+			}))];
+		}
+		const download = async (url) => {
+			const response = await request(url, "subscription");
+			const nodes = ProxyUtils.parse(decryptSubscription(response.body));
+			if (!Array.isArray(nodes) || !nodes.length) throw new Error("Apex 订阅未解析到有效节点");
+			$substore.write(url, cacheKey);
+			return nodes;
+		};
+		const cached = $substore.read(cacheKey);
+		if (cached) try {
+			for (const url of subscriptionURLs(cached)) return await download(url);
+		} catch (error) {
+			$substore.write("", cacheKey);
+			$substore.info(`Apex 缓存失效，重新登录: ${errorMessage(error)}`);
+		}
+		for (const domain of domains) {
+			let stage = "登录";
+			try {
+				var _login$data, _JSON$parse;
+				const login = JSON.parse(text((await request(apiURL(domain, "/api/v1/passport/auth/login"), "api", {
+					method: "POST",
+					body: {
+						email: config.username,
+						password: config.password
+					}
+				})).body));
+				const auth = login === null || login === void 0 || (_login$data = login.data) === null || _login$data === void 0 ? void 0 : _login$data.auth_data;
+				if (typeof auth !== "string" || !auth) throw new Error("Apex 登录响应缺少 auth_data");
+				sensitiveValues.push(auth);
+				stage = "获取订阅地址";
+				const sub = (_JSON$parse = JSON.parse(text((await request(apiURL(domain, "/api/v1/user/getSubscribe"), "api", { auth })).body))) === null || _JSON$parse === void 0 ? void 0 : _JSON$parse.data;
+				if (!sub || !sub.subscribe_url && !sub.token) throw new Error("Apex getSubscribe 缺少 subscribe_url/token");
+				if (sub.token) sensitiveValues.push(sub.token);
+				stage = "下载订阅";
+				for (const url of subscriptionURLs(sub.subscribe_url, sub.token)) try {
+					return await download(url);
+				} catch (error) {
+					failures.push(`下载订阅 ${httpsURL(url).origin}: ${errorMessage(error)}`);
+				}
+			} catch (error) {
+				failures.push(`${stage} ${httpsURL(domain).origin}: ${errorMessage(error)}`);
+			}
+		}
+		throw new Error(`Apex 订阅获取失败: ${[...new Set(failures)].join("；")}`);
+	}
+	function normalizeApex(value) {
+		if (value == null) return null;
+		if (typeof value !== "object" || Array.isArray(value)) throw new Error("provider 参数 apex 必须为对象");
+		for (const name of [
+			"configPublicKey",
+			"subscriptionPublicKey",
+			"subscriptionKey"
+		]) if (typeof value[name] !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(value[name])) throw new Error(`Apex ${name} 必须为 32 字节 Base64`);
+		if (typeof value.xorKey !== "string" || !/^[A-Za-z0-9]{32}$/.test(value.xorKey)) throw new Error("Apex xorKey 无效");
+		if (!/^[a-z][a-z0-9]*$/.test(value.flag) || !Number.isInteger(value.profileId) || !Number.isInteger(value.keyId) || value.profileId < 1 || value.keyId < 1) throw new Error("Apex flag/profileId/keyId 无效");
+		const ids = /* @__PURE__ */ new Set();
+		for (const purpose of [
+			"oss",
+			"api",
+			"subscription"
+		]) {
+			var _value$mtls, _bundle$client_cert_p, _bundle$client_key_pe;
+			const bundle = (_value$mtls = value.mtls) === null || _value$mtls === void 0 ? void 0 : _value$mtls[purpose];
+			if ((bundle === null || bundle === void 0 ? void 0 : bundle.version) !== 1 || bundle.purpose !== purpose || !Number.isInteger(bundle.profile_id) || !((_bundle$client_cert_p = bundle.client_cert_pem) === null || _bundle$client_cert_p === void 0 ? void 0 : _bundle$client_cert_p.startsWith("-----BEGIN CERTIFICATE-----")) || !((_bundle$client_key_pe = bundle.client_key_pem) === null || _bundle$client_key_pe === void 0 ? void 0 : _bundle$client_key_pe.startsWith("-----BEGIN PRIVATE KEY-----"))) throw new Error(`Apex ${purpose} 客户端证书缺失或用途错误`);
+			ids.add(bundle.profile_id);
+		}
+		if (ids.size !== 1) throw new Error("Apex 三组客户端证书品牌不一致");
+		return value;
+	}
+	//#endregion
 	//#region node_modules/asmcrypto.js/dist_es8/aes/aes.asm.js
 	/**
 	* @file {@link http://asmjs.org Asm.js} implementation of the {@link https://en.wikipedia.org/wiki/Advanced_Encryption_Standard Advanced Encryption Standard}.
@@ -1716,29 +1999,64 @@ var ProviderApiSubscription = (function(exports) {
 		const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 		let nodeRuntime;
 		let nodeRuntimeResolved = false;
-		const config = parseConfig(Array.isArray(context === null || context === void 0 ? void 0 : context.raw) ? context.raw.filter((item) => item != null).join("\n") : (context === null || context === void 0 ? void 0 : context.raw) == null ? "" : String(context.raw));
+		const raw = Array.isArray(context === null || context === void 0 ? void 0 : context.raw) ? context.raw.filter((item) => item != null).join("\n") : (context === null || context === void 0 ? void 0 : context.raw) == null ? "" : String(context.raw);
+		const sensitiveValues = [];
+		const config = parseConfig(raw);
+		sensitiveValues.push(config.username, config.password);
 		const activeSubscriptionHeaders = config.headers;
 		const configHash = getHash(stableStringify(config));
 		const subscribeUrlCacheKey = `${SUBSCRIBE_URL_CACHE_PREFIX}${configHash}`;
+		const subscribeUuidCacheKey = `${CACHE_PREFIX}uuid:${configHash}`;
+		let subscriptionUuid = normalizeString($substore.read(subscribeUuidCacheKey)).trim();
+		if (subscriptionUuid) sensitiveValues.push(subscriptionUuid);
 		const settings = $substore.read("settings") || {};
 		const timeout = positiveNumber((_$arguments = $arguments) === null || _$arguments === void 0 ? void 0 : _$arguments.timeout) ? Number($arguments.timeout) : settings.defaultTimeout || 8e3;
 		const proxy = ((_$arguments2 = $arguments) === null || _$arguments2 === void 0 ? void 0 : _$arguments2.proxy) || settings.defaultProxy || ((_globalThis$process = globalThis.process) === null || _globalThis$process === void 0 || (_globalThis$process = _globalThis$process.env) === null || _globalThis$process === void 0 ? void 0 : _globalThis$process.SUB_STORE_BACKEND_DEFAULT_PROXY);
+		if (config.apex) {
+			clearAutoSubUserinfo();
+			const key = Symbol.for("sub-store.provider-api-subscription.refresh-tasks");
+			const tasks = globalThis[key] instanceof Map ? globalThis[key] : globalThis[key] = /* @__PURE__ */ new Map();
+			const refreshKey = `${CACHE_PREFIX}apex-refresh:${configHash}`;
+			if (tasks.has(refreshKey)) return tasks.get(refreshKey);
+			const task = runApexProvider({
+				config,
+				runtime: getNodeRuntime(),
+				timeout,
+				proxy,
+				sensitiveValues,
+				errorMessage,
+				cacheKey: `${CACHE_PREFIX}apex-url:${configHash}`
+			});
+			tasks.set(refreshKey, task);
+			try {
+				return await task;
+			} finally {
+				tasks.delete(refreshKey);
+			}
+		}
 		const fetchAndParse = async (subscribeUrl) => {
 			let lastError;
 			const requestUrl = normalizeString(subscribeUrl).split("#")[0].trim();
 			try {
 				const content = await fetchSubscriptionContent(requestUrl);
 				const candidates = [content];
-				if (config.decrypt) try {
+				const isSn2 = content.trim().startsWith("SN2.");
+				if (isSn2) candidates.splice(0, 1, await decryptSn2Subscription(content));
+				if (!isSn2 && config.decrypt) try {
 					candidates.push(await decryptAesBase64(content, config.decrypt));
 				} catch (error) {
 					lastError = error;
 				}
-				if (config.subscriptionDecrypt) try {
+				if (!isSn2 && config.subscriptionDecrypt) try {
 					candidates.push(await decryptSubscriptionContent(content, config.subscriptionDecrypt));
 				} catch (error) {
 					lastError = error;
 				}
+				if (!isSn2) try {
+					const mirrored = "ZYXWVUTSRQPONMLKJIHGFEDCBAzyxwvutsrqponmlkjihgfedcba9876543210/+";
+					const normalized = content.trim().replace(/[A-Za-z0-9+/]/g, (char) => BASE64_ALPHABET[mirrored.indexOf(char)]);
+					candidates.push(bytesToUtf8(base64ToBytes(normalized)));
+				} catch (_unused) {}
 				for (const candidate of candidates) try {
 					const parsed = ProxyUtils.parse(candidate);
 					if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("provider API 订阅未解析到有效节点");
@@ -1759,6 +2077,8 @@ var ProviderApiSubscription = (function(exports) {
 		} catch (error) {
 			$substore.info(`provider API 缓存的订阅地址已失效，将重新获取: ${errorMessage(error)}`);
 			$substore.write("", subscribeUrlCacheKey);
+			$substore.write("", subscribeUuidCacheKey);
+			subscriptionUuid = "";
 			clearAutoSubUserinfo();
 		}
 		const refreshTasksKey = Symbol.for("sub-store.provider-api-subscription.refresh-tasks");
@@ -1768,31 +2088,44 @@ var ProviderApiSubscription = (function(exports) {
 		const task = (async () => {
 			const refreshedCachedUrl = normalizeString($substore.read(subscribeUrlCacheKey)).trim();
 			if (refreshedCachedUrl) {
+				subscriptionUuid = normalizeString($substore.read(subscribeUuidCacheKey)).trim();
+				if (subscriptionUuid) sensitiveValues.push(subscriptionUuid);
 				const parsed = await fetchAndParse(refreshedCachedUrl);
 				persistSubUserinfo(refreshedCachedUrl);
 				return parsed;
 			}
 			const baseURLs = await fetchBaseURLs();
-			const authHeaders = {};
-			const configuredUserAgent = getHeader(config.headers, "user-agent");
-			if (configuredUserAgent) authHeaders["User-Agent"] = configuredUserAgent;
-			let lastError;
-			for (const baseURL of baseURLs) try {
-				const { subscribeUrl, token } = await getSubscribe(baseURL, await login(baseURL, authHeaders), authHeaders);
-				const candidates = [subscribeUrl];
-				if (token) for (const fallbackBaseURL of baseURLs) candidates.push(fallbackSubscribeURL(fallbackBaseURL, token));
-				for (const candidate of unique(candidates.filter(Boolean))) try {
-					const parsed = await fetchAndParse(candidate);
-					$substore.write(candidate, subscribeUrlCacheKey);
-					persistSubUserinfo(candidate);
-					return parsed;
+			const authHeaders = {
+				"User-Agent": CFG_USER_AGENT,
+				Accept: "application/json"
+			};
+			const failures = [];
+			for (const baseURL of baseURLs) {
+				let stage = "登录";
+				try {
+					const authData = await login(baseURL, authHeaders);
+					sensitiveValues.push(authData);
+					stage = "获取订阅地址";
+					const { subscribeUrl, token, uuid } = await getSubscribe(baseURL, authData, authHeaders);
+					if (token) sensitiveValues.push(token);
+					subscriptionUuid = uuid;
+					if (uuid) sensitiveValues.push(uuid);
+					const candidates = [subscribeUrl];
+					if (token) for (const fallbackBaseURL of baseURLs) candidates.push(fallbackSubscribeURL(fallbackBaseURL, token));
+					for (const candidate of unique(candidates.filter(Boolean))) try {
+						const parsed = await fetchAndParse(candidate);
+						$substore.write(candidate, subscribeUrlCacheKey);
+						$substore.write(subscriptionUuid, subscribeUuidCacheKey);
+						persistSubUserinfo(candidate);
+						return parsed;
+					} catch (error) {
+						failures.push(`下载订阅 ${requestOrigin(candidate)}: ${errorMessage(error)}`);
+					}
 				} catch (error) {
-					lastError = error;
+					failures.push(`${stage} ${requestOrigin(baseURL)}: ${errorMessage(error)}`);
 				}
-			} catch (error) {
-				lastError = error;
 			}
-			throw new Error(`provider API 订阅获取失败: ${errorMessage(lastError || "无可用订阅地址")}`);
+			throw new Error(`provider API 订阅获取失败: ${unique(failures).join("；") || "无可用订阅地址"}`);
 		})();
 		refreshTasks.set(refreshKey, task);
 		try {
@@ -1812,6 +2145,7 @@ var ProviderApiSubscription = (function(exports) {
 			if (cfgUrls.length === 0) throw new Error("provider 参数 cfgUrls 不能为空");
 			return {
 				cfgUrls,
+				apex: normalizeApex(value.apex),
 				username: normalizeString(value.username),
 				password: normalizeString(value.password),
 				headers: normalizeHeaders(value.headers),
@@ -1844,7 +2178,7 @@ var ProviderApiSubscription = (function(exports) {
 				try {
 					return await fetchConfigHosts(cfgUrl);
 				} catch (error) {
-					$substore.error(`provider cfgUrl 获取失败: ${errorMessage(error)}`);
+					$substore.error(`provider cfgUrl ${requestOrigin(cfgUrl)} 获取失败: ${errorMessage(error)}`);
 					return [];
 				}
 			}))).flat().flatMap((host) => baseURLCandidates(host)));
@@ -1892,18 +2226,23 @@ var ProviderApiSubscription = (function(exports) {
 			} })).body, "getSubscribe 响应")) === null || _parseJSON === void 0 ? void 0 : _parseJSON.data) || {};
 			const subscribeUrl = normalizeString(data.subscribe_url).trim();
 			const token = normalizeString(data.token).trim();
+			const uuid = normalizeString(data.uuid).trim();
 			if (!subscribeUrl && !token) throw new Error("getSubscribe 响应缺少 subscribe_url 或 token");
 			return {
 				subscribeUrl,
-				token
+				token,
+				uuid
 			};
 		}
 		async function fetchSubscriptionContent(subscribeUrl) {
+			var _$substore$env;
 			const content = bodyToText((await request("get", subscribeUrl, {
 				headers: config.headers,
-				encoding: null
+				encoding: null,
+				...((_$substore$env = $substore.env) === null || _$substore$env === void 0 ? void 0 : _$substore$env.isNode) ? { strictSSL: false } : { insecure: true }
 			})).body);
 			if (!content.trim()) throw new Error("provider API 订阅内容为空");
+			if (/^\s*(?:<!doctype\s+html\b|<html\b)/i.test(content)) throw new Error("订阅地址返回 HTML 验证页或错误页，未收到节点配置");
 			return content;
 		}
 		async function decryptOssConfig(body, decrypt) {
@@ -1923,12 +2262,22 @@ var ProviderApiSubscription = (function(exports) {
 				const decipher = runtime.crypto.createDecipheriv("aes-256-gcm", key, runtime.Buffer.from(nonce));
 				decipher.setAuthTag(runtime.Buffer.from(tag));
 				return runtime.Buffer.concat([decipher.update(runtime.Buffer.from(ciphertext)), decipher.final()]).toString("utf8");
-			} catch (_unused) {}
+			} catch (_unused2) {}
 			const webCryptoPlainText = await tryWebCryptoGcm(password, nonce, sealed);
 			if (webCryptoPlainText) return bytesToUtf8(webCryptoPlainText);
 			const key = new Sha256().process(password).finish().result;
 			if (!(key instanceof Uint8Array) || key.length !== 32) throw new Error("AES-GCM SHA-256 密钥派生失败");
 			return bytesToUtf8(AES_GCM.decrypt(sealed, key, nonce, void 0, 16));
+		}
+		async function decryptSn2Subscription(body) {
+			var _config$subscriptionD;
+			const parts = body.trim().split(".");
+			const expiresAt = Number(parts[1]);
+			if (parts.length !== 3 || !/^\d+$/.test(parts[1]) || !Number.isSafeInteger(expiresAt)) throw new Error("SN2 订阅封装格式无效");
+			if (Math.floor(Date.now() / 1e3) > expiresAt) throw new Error("SN2 订阅已过期，请重新获取");
+			if (!subscriptionUuid) throw new Error("SN2 订阅解密缺少账号 UUID，getSubscribe 未返回 uuid");
+			const seed = /^[0-9a-f]{32}$/.test((_config$subscriptionD = config.subscriptionDecrypt) === null || _config$subscriptionD === void 0 ? void 0 : _config$subscriptionD.password) ? config.subscriptionDecrypt.password : "66d570165fad0012ba46077644ac1ba6";
+			return decryptSubscriptionContent(parts[2], { password: `${seed}${subscriptionUuid}` });
 		}
 		async function decryptAesBase64(body, decrypt) {
 			const key = utf8ToBytes(decrypt.key);
@@ -1940,31 +2289,33 @@ var ProviderApiSubscription = (function(exports) {
 				const decipher = runtime.crypto.createDecipheriv("aes-128-cbc", runtime.Buffer.from(key), runtime.Buffer.from(iv));
 				const plainText = runtime.Buffer.concat([decipher.update(runtime.Buffer.from(encrypted)), decipher.final()]);
 				return decodeNestedBase64(new Uint8Array(plainText.buffer, plainText.byteOffset, plainText.byteLength));
-			} catch (_unused2) {}
+			} catch (_unused3) {}
 			const webCryptoPlainText = await tryWebCryptoCbc(key, iv, encrypted);
 			if (webCryptoPlainText) try {
 				return decodeNestedBase64(webCryptoPlainText);
-			} catch (_unused3) {}
+			} catch (_unused4) {}
 			return decodeNestedBase64(AES_CBC.decrypt(encrypted, key, true, iv));
 		}
 		function decodeNestedBase64(value) {
 			return bytesToUtf8(base64ToBytes(bytesToUtf8(value).trim()));
 		}
 		function getNodeRuntime() {
-			var _$substore$env;
+			var _$substore$env2;
 			if (nodeRuntimeResolved) return nodeRuntime;
 			nodeRuntimeResolved = true;
 			nodeRuntime = null;
-			if (!((_$substore$env = $substore.env) === null || _$substore$env === void 0 ? void 0 : _$substore$env.isNode)) return nodeRuntime;
+			if (!((_$substore$env2 = $substore.env) === null || _$substore$env2 === void 0 ? void 0 : _$substore$env2.isNode)) return nodeRuntime;
 			try {
-				var _globalThis$process2, _globalThis$process2$;
-				const crypto = (_globalThis$process2 = globalThis.process) === null || _globalThis$process2 === void 0 || (_globalThis$process2$ = _globalThis$process2.getBuiltinModule) === null || _globalThis$process2$ === void 0 ? void 0 : _globalThis$process2$.call(_globalThis$process2, "crypto");
+				var _globalThis$process2;
+				const loadModule = ((_globalThis$process2 = globalThis.process) === null || _globalThis$process2 === void 0 ? void 0 : _globalThis$process2.getBuiltinModule) ? (name) => globalThis.process.getBuiltinModule(name) : typeof require === "function" ? (name) => require(name) : null;
+				const crypto = loadModule === null || loadModule === void 0 ? void 0 : loadModule("crypto");
 				const NodeBuffer = globalThis.Buffer;
 				if (typeof (crypto === null || crypto === void 0 ? void 0 : crypto.createDecipheriv) === "function" && typeof (crypto === null || crypto === void 0 ? void 0 : crypto.createHash) === "function" && typeof (NodeBuffer === null || NodeBuffer === void 0 ? void 0 : NodeBuffer.from) === "function") nodeRuntime = {
 					crypto,
-					Buffer: NodeBuffer
+					Buffer: NodeBuffer,
+					loadModule
 				};
-			} catch (_unused4) {
+			} catch (_unused5) {
 				nodeRuntime = null;
 			}
 			return nodeRuntime;
@@ -1985,7 +2336,7 @@ var ProviderApiSubscription = (function(exports) {
 					iv
 				}, cryptoKey, encrypted);
 				return new Uint8Array(plainText);
-			} catch (_unused5) {
+			} catch (_unused6) {
 				return null;
 			}
 		}
@@ -2005,7 +2356,7 @@ var ProviderApiSubscription = (function(exports) {
 					tagLength: 128
 				}, cryptoKey, sealed);
 				return new Uint8Array(plainText);
-			} catch (_unused6) {
+			} catch (_unused7) {
 				return null;
 			}
 		}
@@ -2041,7 +2392,7 @@ var ProviderApiSubscription = (function(exports) {
 			const text = normalizeString(value);
 			if (typeof TextEncoder !== "undefined") try {
 				return new TextEncoder().encode(text);
-			} catch (_unused7) {}
+			} catch (_unused8) {}
 			const bytes = [];
 			for (let index = 0; index < text.length; index++) {
 				let codePoint = text.charCodeAt(index);
@@ -2063,7 +2414,7 @@ var ProviderApiSubscription = (function(exports) {
 			const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
 			if (typeof TextDecoder !== "undefined") try {
 				return new TextDecoder("utf-8").decode(bytes);
-			} catch (_unused8) {}
+			} catch (_unused9) {}
 			let output = "";
 			for (let index = 0; index < bytes.length;) {
 				const first = bytes[index++];
@@ -2096,8 +2447,8 @@ var ProviderApiSubscription = (function(exports) {
 			return output;
 		}
 		function bodyToText(value) {
-			var _$substore$env2;
-			if (((_$substore$env2 = $substore.env) === null || _$substore$env2 === void 0 ? void 0 : _$substore$env2.isNode) && typeof Buffer !== "undefined") {
+			var _$substore$env3;
+			if (((_$substore$env3 = $substore.env) === null || _$substore$env3 === void 0 ? void 0 : _$substore$env3.isNode) && typeof Buffer !== "undefined") {
 				if (Buffer.isBuffer(value) || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return toBuffer(value).toString("utf8");
 			}
 			return normalizeString(value);
@@ -2117,14 +2468,17 @@ var ProviderApiSubscription = (function(exports) {
 			return response;
 		}
 		function getProxyOptions(selectedProxy) {
-			var _$substore$env3, _$substore$env4;
+			var _$substore$env4, _$substore$env5;
 			const options = { proxy: selectedProxy };
-			if ((_$substore$env3 = $substore.env) === null || _$substore$env3 === void 0 ? void 0 : _$substore$env3.isLoon) options.node = selectedProxy;
-			if ((_$substore$env4 = $substore.env) === null || _$substore$env4 === void 0 ? void 0 : _$substore$env4.isQX) options.opts = { policy: selectedProxy };
+			if ((_$substore$env4 = $substore.env) === null || _$substore$env4 === void 0 ? void 0 : _$substore$env4.isLoon) options.node = selectedProxy;
+			if ((_$substore$env5 = $substore.env) === null || _$substore$env5 === void 0 ? void 0 : _$substore$env5.isQX) options.opts = { policy: selectedProxy };
 			return options;
 		}
 		function buildSubUserinfoUrl(url, headers) {
-			return buildUrlArguments(url, headers, { providerScriptAutoSubUserinfo: true });
+			return buildUrlArguments(url, headers, {
+				providerScriptAutoSubUserinfo: true,
+				insecure: true
+			});
 		}
 		function buildUrlArguments(url, headers, extraArguments = {}) {
 			const baseUrl = normalizeString(url).split("#")[0];
@@ -2192,11 +2546,6 @@ var ProviderApiSubscription = (function(exports) {
 			if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {};
 			return Object.fromEntries(Object.entries(headers).filter(([key, value]) => key && value != null).map(([key, value]) => [String(key), String(value)]));
 		}
-		function getHeader(headers, name) {
-			const target = name.toLowerCase();
-			const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === target);
-			return entry === null || entry === void 0 ? void 0 : entry[1];
-		}
 		function stableStringify(value) {
 			if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
 			if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
@@ -2235,8 +2584,27 @@ var ProviderApiSubscription = (function(exports) {
 			return [...new Set(values)];
 		}
 		function errorMessage(error) {
-			var _error$message;
-			return (_error$message = error === null || error === void 0 ? void 0 : error.message) !== null && _error$message !== void 0 ? _error$message : String(error);
+			const messages = [];
+			const seen = /* @__PURE__ */ new Set();
+			for (let current = error; current != null && !seen.has(current); current = current === null || current === void 0 ? void 0 : current.cause) {
+				var _current$message;
+				seen.add(current);
+				messages.push((_current$message = current === null || current === void 0 ? void 0 : current.message) !== null && _current$message !== void 0 ? _current$message : String(current));
+				if (current === null || current === void 0 ? void 0 : current.code) messages.push(String(current.code));
+				if (seen.size >= 4) break;
+			}
+			let message = unique(messages).join(": ");
+			message = message.replace(/([?&][^=&#\s]+)=([^&#\s]*)/g, "$1=[redacted]");
+			for (const secret of sensitiveValues) {
+				if (!secret) continue;
+				message = message.split(secret).join("[redacted]");
+				message = message.split(encodeURIComponent(secret)).join("[redacted]");
+			}
+			return message;
+		}
+		function requestOrigin(url) {
+			var _normalizeString$matc;
+			return ((_normalizeString$matc = normalizeString(url).match(/^https?:\/\/([^/?#]+)/i)) === null || _normalizeString$matc === void 0 ? void 0 : _normalizeString$matc[0].replace(/\/\/[^/@]+@/, "//[redacted]@")) || "未知服务";
 		}
 	}
 	//#endregion

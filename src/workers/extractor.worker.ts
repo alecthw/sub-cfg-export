@@ -55,9 +55,26 @@ async function decompressInnoPayload(installer: Uint8Array): Promise<Uint8Array>
   if (markerPositions.length === 0) throw new Error('未找到 Inno Setup LZMA2 数据块')
 
   let lastError: unknown
+  let appEntry: { size: number; sha256: string } | undefined
   for (const markerPos of markerPositions) {
     try {
-      return await decodeAt(installer, markerPos)
+      if (appEntry) {
+        const stream = readLzma2Stream(installer, markerPos + INNO_MARKER.length + 1)
+        if (stream.uncompressedSize !== appEntry.size) continue
+        const decoded = await decodeAt(installer, markerPos)
+        const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', decoded as Uint8Array<ArrayBuffer>))
+        if ([...hash].map((v) => v.toString(16).padStart(2, '0')).join('') !== appEntry.sha256) continue
+        return decoded
+      }
+      const decoded = await decodeAt(installer, markerPos)
+      if (decoded[0] === 0x7b) {
+        try {
+          const manifest = JSON.parse(new TextDecoder().decode(decoded))
+          appEntry = manifest.files?.find((f: { path: string }) => f.path === 'data/app.so')
+        } catch { /* Legacy payloads are not manifests. */ }
+        if (appEntry) continue
+      }
+      return decoded
     } catch (error) {
       lastError = error
     }

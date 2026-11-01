@@ -9,7 +9,8 @@
     "build": "npm run build:provider && tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false",
-    "test:provider": "npm run build:provider && node --no-warnings --test test/provider-runtime.test.mjs",
+    "test:extractor": "node --experimental-strip-types --test test/extractor.test.mjs",
+    "test:provider": "npm run build:provider && node --no-warnings --test test/provider-runtime.test.mjs test/apex-provider.test.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

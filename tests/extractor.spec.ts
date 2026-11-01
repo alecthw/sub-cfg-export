@@ -12,6 +12,7 @@ const test = base.extend<{ page: Page }>({
   },
 })
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 const root = process.cwd()
 
@@ -48,7 +49,7 @@ test('globalcloud exports complete YAML without decrypt block', async ({ page })
   const providerScript = await scriptResponse.text()
   expect(providerScript).toContain('async function operator')
   expect(providerScript).toContain('decryptOssConfig')
-  expect(providerScript).not.toContain('searchParams.set("flag"')
+  expect(providerScript).toContain('apex-sub-sign-v2')
   expect(providerScript).toContain('decryptAesBase64(content, config.decrypt)')
   expect(providerScript).not.toContain('SUBSCRIPTION_USER_AGENT')
   expect(yaml).toBe(
@@ -151,16 +152,18 @@ test('provider downloads only the original URL with the configured User-Agent', 
   })
 })
 
-test('xmtz restores XOR URLs and decrypt values', async ({ page }) => {
+test('xmtz 3.2.1 restores Dart 3.13 XOR URLs and relocated decrypt values', async ({ page }) => {
   await openApp(page)
   const yaml = await selectInstaller(page, 'xmtzapp-lite.exe')
   expect(yaml).toContain('https://tcdn.getxlx.com/saos/xmtz_news.json')
   expect(yaml).toContain('https://apisa.cnossfile.com/saos/xmtz_news.json')
   expect(yaml).toContain('https://cdno01.llguanglisf.com/saos/xmtz_news.json')
   expect(yaml).toContain('https://ocdn01.llguangli25o.com:59991/saos/xmtz_news.json')
-  expect(yaml).toContain('User-Agent: NetFlow/v3.0.6 clash-verge Platform/windows')
-  expect(yaml).toContain('key: c8c1dac7d3fff76b')
-  expect(yaml).toContain('iv: c705c9b7f56412d8')
+  expect(yaml).toContain('User-Agent: SecurityNet/v3.2.1 clash-verge Platform/windows')
+  expect(yaml).toContain('key: 4422a60e08c97f30')
+  expect(yaml).toContain('iv: 8c97f304422a60e0')
+  expect(yaml).toContain('subscriptionDecrypt:')
+  expect(yaml).toContain('password: 66d570165fad0012ba46077644ac1ba6')
 })
 
 test('xjkp restores URLs and verified decrypt values', async ({ page }) => {
@@ -397,3 +400,25 @@ test('exposes crawlable SEO metadata and discovery files', async ({ page }) => {
   expect(manifestResponse.ok()).toBe(true)
   expect((await manifestResponse.json()).name).toBe('在 Sub-Store 中获取封端机场订阅节点')
 })
+
+for (const [brand, version, profile] of [['xmtz', '7.1.1', 16], ['xjkp', '7.2.5', 17]] as const) {
+  test(`${brand} Apex speed exports multi-stream app and brand-specific configuration`, async ({ page }) => {
+    await openApp(page)
+    const content = await selectInstaller(page, `${brand}app-speed.exe`)
+    const apexLine = content.split('\n').find((line) => line.startsWith('apex: '))
+    expect(apexLine).toBeTruthy()
+    const apex = JSON.parse(apexLine!.slice(6))
+    expect(content).toContain(`User-Agent: ua.net.${brand}client.app.apex/v${version}`)
+    expect(content).toContain(`[2406:da18:42b:2e00:45ae:b4f6:fc3e:13cb]/apos/${brand}_apexv2.json`)
+    expect(content).not.toContain('subscriptionDecrypt:')
+    expect(Object.keys(apex.mtls).sort()).toEqual(['api', 'oss', 'subscription'])
+    for (const purpose of ['api', 'oss', 'subscription']) {
+      expect(apex.mtls[purpose].purpose).toBe(purpose)
+      expect(apex.mtls[purpose].profile_id).toBe(profile)
+    }
+    // Exact comparison includes the public/secret key roles and PEM newlines.
+    // Do not include private-key contents in assertion failure output.
+    const expected = execFileSync('python3', ['-c', 'import getinfo,sys; from pathlib import Path; print(getinfo.render_yaml(getinfo.extract_info(Path(sys.argv[1]))), end="")', `${brand}app-speed.exe`], { cwd: root, encoding: 'utf8' })
+    expect(content === expected).toBe(true)
+  })
+}

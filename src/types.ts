@@ -23,7 +23,27 @@ export interface SubscriptionDecryptInfo {
   password: string
 }
 
+export interface ApexTlsBundle {
+  version: number
+  profile_id: number
+  purpose: 'oss' | 'api' | 'subscription'
+  client_cert_pem: string
+  client_key_pem: string
+}
+
+export interface ApexInfo {
+  xorKey: string
+  configPublicKey: string
+  subscriptionPublicKey: string
+  subscriptionKey: string
+  flag: string
+  profileId: number
+  keyId: number
+  mtls: Record<'oss' | 'api' | 'subscription', ApexTlsBundle>
+}
+
 export interface ExtractedInfo {
+  apex?: ApexInfo
   cfgUrls: string[]
   userAgent: string
   decrypt: DecryptInfo | null

@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import json
 import lzma
 import mmap
 import os
@@ -17,7 +20,7 @@ from urllib.parse import urlsplit
 
 
 URL_JSON_RE = re.compile(
-    rb"https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?"
+    rb"https?://(?:[A-Za-z0-9.-]+|\[[0-9a-fA-F:]+\])(?::[0-9]{1,5})?"
     rb"/[A-Za-z0-9._~!$&()*+,;=:@%/+-]*?\.json",
     re.IGNORECASE,
 )
@@ -102,6 +105,7 @@ def _decompress_inno_payload(installer: bytes):
         raise ExtractionError("未找到 Inno Setup LZMA2 数据块")
 
     last_error = None
+    app_entry = None
     for offset in offsets:
         output = tempfile.TemporaryFile()
         try:
@@ -125,6 +129,28 @@ def _decompress_inno_payload(installer: bytes):
             if output.tell() < 1024:
                 raise lzma.LZMAError("decompressed payload is unexpectedly small")
             output.seek(0)
+            if app_entry:
+                digest = hashlib.sha256()
+                while chunk := output.read(1024 * 1024):
+                    digest.update(chunk)
+                if output.tell() != app_entry['size'] or digest.hexdigest() != app_entry['sha256']:
+                    output.close()
+                    continue
+                output.seek(0)
+                return output
+            if output.tell() == 0:
+                prefix = output.read(1)
+                output.seek(0)
+                if prefix == b'{':
+                    try:
+                        manifest = json.load(output)
+                        app_entry = next((f for f in manifest.get('files', []) if f.get('path') == 'data/app.so'), None)
+                    except (ValueError, AttributeError):
+                        pass
+                    output.seek(0)
+                    if app_entry:
+                        output.close()
+                        continue
             return output
         except (ValueError, lzma.LZMAError) as exc:
             last_error = exc
@@ -199,6 +225,35 @@ def _parse_small_integer_refs(data, snapshot):
     end = snapshot["end"]
 
     string_tags, pos = _read_compact_signed(data, pos, end, 32)
+    modern_tags = string_tags >= 0x1000
+    first_ref = 1 + snapshot["num_base"]
+    ref_values = {}
+    if modern_tags:
+        # Dart 3.13 uses object-header tags and may emit singleton clusters
+        # before String. Count their references and retain Mint(0), which
+        # also occurs in XOR-obfuscated URL arrays.
+        sized_clusters = {23, 24, 25, 26, 27, 28, 30, 90, 91}
+        cluster_count = 0
+        while string_tags >> 12 != 93:
+            cluster_count += 1
+            if cluster_count >= snapshot["num_clusters"]:
+                raise ValueError("Dart String cluster missing")
+            cid = string_tags >> 12
+            if cid != 61 and cid not in sized_clusters:
+                raise ValueError("unsupported Dart prefix cluster")
+            count, pos = _read_unsigned(data, pos, end)
+            if count > snapshot["num_objects"] - first_ref + 1:
+                raise ValueError("invalid Dart cluster object count")
+            for index in range(count):
+                if cid == 61:
+                    value, pos = _read_compact_signed(data, pos, end, 64)
+                    if 0 <= value <= 255:
+                        ref_values[first_ref + index] = value
+                else:
+                    _, pos = _read_unsigned(data, pos, end)
+            first_ref += count
+            string_tags, pos = _read_compact_signed(data, pos, end, 32)
+
     string_count, pos = _read_unsigned(data, pos, end)
     if not 100 <= string_count <= snapshot["num_objects"]:
         raise ValueError("unexpected Dart string cluster")
@@ -215,13 +270,14 @@ def _parse_small_integer_refs(data, snapshot):
         for _ in range(string_count - first_element):
             _, pos = _read_unsigned(data, pos, end)
 
-    _, pos = _read_compact_signed(data, pos, end, 32)  # Mint cluster tags
+    integer_tags, pos = _read_compact_signed(data, pos, end, 32)
+    if modern_tags and integer_tags >> 12 != 61:
+        raise ValueError("unexpected Dart Mint cluster")
     integer_count, pos = _read_unsigned(data, pos, end)
     if not 128 <= integer_count <= snapshot["num_objects"]:
         raise ValueError("unexpected Dart integer cluster")
 
-    first_ref = 1 + snapshot["num_base"] + string_count
-    ref_values = {}
+    first_ref += string_count
     for index in range(integer_count):
         value, pos = _read_compact_signed(data, pos, end, 64)
         if 0 <= value <= 255:
@@ -232,7 +288,7 @@ def _parse_small_integer_refs(data, snapshot):
     return ref_values, pos
 
 
-def _decode_smi_arrays(data, snapshot):
+def _decode_smi_arrays(data, snapshot, subscription_passwords=None):
     try:
         ref_values, scan_start = _parse_small_integer_refs(data, snapshot)
     except ValueError:
@@ -281,6 +337,40 @@ def _decode_smi_arrays(data, snapshot):
             continue
         seen_arrays.add(marker)
 
+        if subscription_passwords is not None and length == 12:
+            try:
+                parts = [raw]
+                next_pos = pos
+                for _ in range(2):
+                    next_length, next_pos = _read_unsigned(data, next_pos, end)
+                    if next_length != 10:
+                        raise ValueError("unexpected seed part")
+                    next_type, next_pos = _read_ref_id(data, next_pos, end)
+                    if not 0 < next_type <= max_ref:
+                        raise ValueError("invalid seed type")
+                    part = []
+                    for _ in range(10):
+                        ref, next_pos = _read_ref_id(data, next_pos, end)
+                        part.append(ref_values[ref])
+                    parts.append(bytes(part))
+                first = bytes(v ^ 0x5a ^ ((i + 0xc3) & 0xff) for i, v in enumerate(parts[2]))
+                second = bytes((v - 0x3c - i) & 0xff for i, v in enumerate(parts[1]))
+                third = []
+                for i, v in enumerate(parts[0]):
+                    byte, shift = v ^ 0xa7, i % 5 + 1
+                    third.append(((byte >> shift) | (byte << (8 - shift))) & 0xff)
+                seed = first + second + bytes(third)
+                if re.fullmatch(b"[0-9a-f]{32}", seed):
+                    subscription_passwords.append(seed.decode("ascii"))
+            except (ValueError, KeyError):
+                pass
+
+        if subscription_passwords is not None and length == 16:
+            candidates = {bytes(v ^ mask for v in raw) for mask in range(1, 256)}
+            candidates = {v.decode("ascii").lower() for v in candidates if HEX16_RE.fullmatch(v)}
+            if len(candidates) == 1:
+                subscription_passwords.extend(candidates)
+
         # URL arrays used by these clients are either plain ASCII or protected
         # with a one-byte XOR. Derive likely masks from the expected "h" prefix.
         masks = {0, raw[0] ^ ord("h"), raw[0] ^ ord("H")}
@@ -301,7 +391,7 @@ def _decode_smi_arrays(data, snapshot):
     return urls, hex_values
 
 
-def _select_snapshot_info(data):
+def _select_snapshot_info(data, subscription_passwords=None):
     snapshots = _snapshot_candidates(data)
     snapshots.sort(
         key=lambda item: (item["num_clusters"], item["num_objects"]),
@@ -310,8 +400,11 @@ def _select_snapshot_info(data):
     for snapshot in snapshots:
         if snapshot["num_clusters"] < 100:
             continue
-        urls, hex_values = _decode_smi_arrays(data, snapshot)
+        passwords = [] if subscription_passwords is not None else None
+        urls, hex_values = _decode_smi_arrays(data, snapshot, passwords)
         if urls:
+            if subscription_passwords is not None:
+                subscription_passwords.extend(passwords)
             return urls, hex_values
     return [], []
 
@@ -385,9 +478,6 @@ def _select_decrypt_values(selected_urls, dart_urls, hex_values):
         re.search(r"/saos/(?:xjkp|xmtz)_news\.json$", urlsplit(url).path, re.IGNORECASE)
         for url in selected_urls
     )
-    if lite_family:
-        return {"key": "10b78659c06ec08a", "iv": "e8be417610d21adc"}
-
     if not selected_urls or not dart_urls:
         return None
 
@@ -395,6 +485,16 @@ def _select_decrypt_values(selected_urls, dart_urls, hex_values):
     positions = [pos for pos, url in dart_urls if url in selected_set]
     if not positions:
         return None
+
+    if lite_family:
+        last_url_pos = max(positions)
+        following = sorted(
+            (pos, value)
+            for pos, value in hex_values
+            if 0 < pos - last_url_pos <= 64 * 1024
+        )[:2]
+        if len(following) == 2 and following[0][1] != following[1][1]:
+            return {"key": following[1][1], "iv": following[0][1]}
 
     first_url_pos = min(positions)
     nearby = [
@@ -433,7 +533,7 @@ def _extract_product_version(installer: bytes):
 
 def _extract_user_agent(installer: bytes, payload):
     brand = next(
-        (value.decode("ascii") for value in (b"NetFlow", b"securitynet") if payload.find(value) >= 0),
+        (value.decode("ascii") for value in (b"NetFlow", b"SecurityNet", b"securitynet") if payload.find(value) >= 0),
         None,
     )
     version = _extract_product_version(installer)
@@ -449,6 +549,97 @@ def _extract_user_agent(installer: bytes, payload):
     return f"{brand}/v{version} clash-verge Platform/{platform}"
 
 
+def _extract_apex(data, installer):
+    if data.find(b'apex-config-v1') < 0:
+        return None
+    snapshots = sorted(_snapshot_candidates(data), key=lambda v: v['num_clusters'], reverse=True)
+    for snap in snapshots:
+        if snap['num_clusters'] < 100:
+            continue
+        end = snap['end']
+        pos = snap['cluster_pos']
+        tags, pos = _read_compact_signed(data, pos, end, 32)
+        if tags >> 12 != 93:
+            continue
+        count, pos = _read_unsigned(data, pos, end)
+        if count > snap['num_objects']:
+            continue
+        image = (end + 63) // 64 * 64
+        strings = {}
+        offset = 0
+        for i in range(count):
+            delta, pos = _read_unsigned(data, pos, end)
+            offset += delta * 16
+            address = image + offset
+            if address + 16 > len(data):
+                raise ExtractionError('Apex Dart 字符串地址越界')
+            cid = struct.unpack_from('<I', data, address)[0] >> 12
+            length = struct.unpack_from('<Q', data, address + 8)[0] // 2
+            width = 1 if cid == 94 else 2
+            if cid not in (94, 95) or length > 100000 or address + 16 + length * width > len(data):
+                raise ExtractionError('Apex Dart 字符串对象无效')
+            strings[snap['num_base'] + 1 + i] = data[address+16:address+16+length*width].decode('latin1' if width == 1 else 'utf-16le')
+        best = []
+        pos = snap['cluster_pos']
+        while pos < end:
+            start = pos
+            refs = []
+            try:
+                while pos < end:
+                    bits = data[pos]
+                    pos += 1
+                    typ, behavior = bits & 15, bits >> 5
+                    ref = None
+                    if typ not in (0, 1, 2):
+                        raise ValueError()
+                    if not behavior:
+                        if typ == 1:
+                            ref, pos = _read_ref_id(data, pos, end)
+                            if not 0 < ref <= snap['num_objects']:
+                                raise ValueError()
+                        elif typ == 0:
+                            _, pos = _read_compact_signed(data, pos, end, 64)
+                    refs.append(strings.get(ref))
+            except ValueError:
+                pass
+            if len(refs) > len(best):
+                best = refs
+            pos = max(start + 1, pos)
+        try:
+            ci = best.index('apex-config-v1')
+            si = best.index('apex-sub-sign-v2\0')
+        except ValueError:
+            continue
+        keys = _unique(v for v in best if isinstance(v, str) and re.fullmatch('[A-Za-z0-9]{32}', v) and len(re.findall('[0-9]', v)) >= 2 and re.search('[A-Z]', v) and re.search('[a-z]', v))
+        if len(keys) != 1:
+            raise ExtractionError('Apex XOR 密钥不唯一，无法可靠提取')
+        tls = {}
+        for value in strings.values():
+            if not value.startswith('eyJ') or len(value) < 500:
+                continue
+            try:
+                bundle = json.loads(base64.b64decode(value, validate=True))
+                if bundle.get('version') == 1 and bundle.get('purpose') in ('oss', 'api', 'subscription'):
+                    tls[bundle['purpose']] = bundle
+            except (ValueError, AttributeError):
+                pass
+        if set(tls) != {'oss', 'api', 'subscription'} or len({b['profile_id'] for b in tls.values()}) != 1:
+            raise ExtractionError('Apex 客户端证书不完整或品牌不一致')
+        apex = dict(xorKey=keys[0], configPublicKey=best[ci+1], subscriptionPublicKey=best[si-2], subscriptionKey=best[si-3], flag='apex', profileId=1, keyId=1, mtls=tls)
+        for field in ('configPublicKey', 'subscriptionPublicKey', 'subscriptionKey'):
+            if not isinstance(apex[field], str) or len(base64.b64decode(apex[field], validate=True)) != 32:
+                raise ExtractionError('Apex 密钥长度无效')
+        urls = _unique(v for v in best if isinstance(v, str) and re.fullmatch(URL_JSON_RE, v.encode('ascii', errors='replace')) and '_apex' in v)
+        if not urls:
+            raise ExtractionError('Apex 配置 URL 缺失')
+        packages = _unique(v for v in strings.values() if re.fullmatch(r'ua\.net\.[a-z0-9]+\.app\.apex', v))
+        version = _extract_product_version(installer)
+        if len(packages) != 1 or not version:
+            raise ExtractionError('Apex 应用标识或版本缺失')
+        return {'cfgUrls': urls, 'userAgent': f'{packages[0]}/v{version}', 'decrypt': None, 'subscriptionDecrypt': None, 'apex': apex}
+    raise ExtractionError('未找到有效的 Apex Dart 常量池')
+
+
 def extract_info(input_path: Path):
     installer = input_path.read_bytes()
     raw_urls = _extract_json_urls(installer)
@@ -458,13 +649,20 @@ def extract_info(input_path: Path):
         payload_size = payload_file.tell()
         payload_file.seek(0)
         with mmap.mmap(payload_file.fileno(), payload_size, access=mmap.ACCESS_READ) as payload:
+            apex = _extract_apex(payload, installer)
+            if apex:
+                return apex
             payload_urls = _extract_json_urls(payload)
-            dart_urls, hex_values = _select_snapshot_info(payload)
+            subscription_passwords = []
+            dart_urls, hex_values = _select_snapshot_info(payload, subscription_passwords)
             user_agent = _extract_user_agent(installer, payload)
 
     cfg_urls = _select_config_urls(_unique(raw_urls + payload_urls), dart_urls)
     decrypt = _select_decrypt_values(cfg_urls, dart_urls, hex_values)
-    return {"cfgUrls": cfg_urls, "userAgent": user_agent, "decrypt": decrypt}
+    passwords = _unique(subscription_passwords)
+    subscription_decrypt = {"type": "aes-256-gcm", "password": passwords[0]} if len(passwords) == 1 else None
+    return {"cfgUrls": cfg_urls, "userAgent": user_agent, "decrypt": decrypt,
+            "subscriptionDecrypt": subscription_decrypt}
 
 
 def _yaml_scalar(value: str) -> str:
@@ -487,6 +685,12 @@ def render_yaml(info) -> str:
         lines.append(f"  iv: {_yaml_scalar(info['decrypt']['iv'])}")
     else:
         lines.append("decrypt: null")
+    if info.get("subscriptionDecrypt"):
+        lines.append("subscriptionDecrypt:")
+        lines.append("  type: aes-256-gcm")
+        lines.append(f"  password: {_yaml_scalar(info['subscriptionDecrypt']['password'])}")
+    if info.get('apex'):
+        lines.append('apex: ' + json.dumps(info['apex'], ensure_ascii=True, separators=(',', ':')))
     return "\n".join(lines) + "\n"
 
 

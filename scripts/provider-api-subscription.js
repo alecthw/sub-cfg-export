@@ -1,3 +1,4 @@
+import { runApexProvider, normalizeApex } from "./apex-provider.js";
 import { AES_CBC } from "asmcrypto.js/dist_es8/aes/cbc.js";
 import { AES_GCM } from "asmcrypto.js/dist_es8/aes/gcm.js";
 import { Sha256 } from "asmcrypto.js/dist_es8/hash/sha256/sha256.js";
@@ -44,10 +45,15 @@ async function operator(proxies, targetPlatform, context) {
     : context?.raw == null
     ? ""
     : String(context.raw);
+  const sensitiveValues = [];
   const config = parseConfig(raw);
+  sensitiveValues.push(config.username, config.password);
   const activeSubscriptionHeaders = config.headers;
   const configHash = getHash(stableStringify(config));
   const subscribeUrlCacheKey = `${SUBSCRIBE_URL_CACHE_PREFIX}${configHash}`;
+  const subscribeUuidCacheKey = `${CACHE_PREFIX}uuid:${configHash}`;
+  let subscriptionUuid = normalizeString($substore.read(subscribeUuidCacheKey)).trim();
+  if (subscriptionUuid) sensitiveValues.push(subscriptionUuid);
   const settings = $substore.read("settings") || {};
   const timeout = positiveNumber($arguments?.timeout)
     ? Number($arguments.timeout)
@@ -57,26 +63,54 @@ async function operator(proxies, targetPlatform, context) {
     settings.defaultProxy ||
     globalThis.process?.env?.SUB_STORE_BACKEND_DEFAULT_PROXY;
 
+  if (config.apex) {
+    clearAutoSubUserinfo();
+    const key = Symbol.for("sub-store.provider-api-subscription.refresh-tasks");
+    const tasks = globalThis[key] instanceof Map ? globalThis[key] : (globalThis[key] = new Map());
+    const refreshKey = `${CACHE_PREFIX}apex-refresh:${configHash}`;
+    if (tasks.has(refreshKey)) return tasks.get(refreshKey);
+    const task = runApexProvider({ config, runtime: getNodeRuntime(), timeout, proxy,
+      sensitiveValues, errorMessage, cacheKey: `${CACHE_PREFIX}apex-url:${configHash}` });
+    tasks.set(refreshKey, task);
+    try { return await task; } finally { tasks.delete(refreshKey); }
+  }
+
   const fetchAndParse = async (subscribeUrl) => {
     let lastError;
     const requestUrl = normalizeString(subscribeUrl).split("#")[0].trim();
     try {
       const content = await fetchSubscriptionContent(requestUrl);
       const candidates = [content];
-      if (config.decrypt) {
+      const isSn2 = content.trim().startsWith("SN2.");
+      if (isSn2) {
+        candidates.splice(0, 1, await decryptSn2Subscription(content));
+      }
+      if (!isSn2 && config.decrypt) {
         try {
           candidates.push(await decryptAesBase64(content, config.decrypt));
         } catch (error) {
           lastError = error;
         }
       }
-      if (config.subscriptionDecrypt) {
+      if (!isSn2 && config.subscriptionDecrypt) {
         try {
           candidates.push(
             await decryptSubscriptionContent(content, config.subscriptionDecrypt)
           );
         } catch (error) {
           lastError = error;
+        }
+      }
+      if (!isSn2) {
+        try {
+          // Official fallback maps the mirrored alphabet back to standard
+          // Base64 before decoding the subscription text.
+          const mirrored = "ZYXWVUTSRQPONMLKJIHGFEDCBAzyxwvutsrqponmlkjihgfedcba9876543210/+";
+          const normalized = content.trim().replace(/[A-Za-z0-9+/]/g,
+            (char) => BASE64_ALPHABET[mirrored.indexOf(char)]);
+          candidates.push(bytesToUtf8(base64ToBytes(normalized)));
+        } catch {
+          // Plain subscriptions and other encrypted formats remain candidates.
         }
       }
       for (const candidate of candidates) {
@@ -109,6 +143,8 @@ async function operator(proxies, targetPlatform, context) {
         `provider API 缓存的订阅地址已失效，将重新获取: ${errorMessage(error)}`
       );
       $substore.write("", subscribeUrlCacheKey);
+      $substore.write("", subscribeUuidCacheKey);
+      subscriptionUuid = "";
       clearAutoSubUserinfo();
     }
   }
@@ -128,27 +164,36 @@ async function operator(proxies, targetPlatform, context) {
       $substore.read(subscribeUrlCacheKey)
     ).trim();
     if (refreshedCachedUrl) {
+      subscriptionUuid = normalizeString($substore.read(subscribeUuidCacheKey)).trim();
+      if (subscriptionUuid) sensitiveValues.push(subscriptionUuid);
       const parsed = await fetchAndParse(refreshedCachedUrl);
       persistSubUserinfo(refreshedCachedUrl);
       return parsed;
     }
 
     const baseURLs = await fetchBaseURLs();
-    const authHeaders = {};
-    const configuredUserAgent = getHeader(config.headers, "user-agent");
-    if (configuredUserAgent) {
-      authHeaders["User-Agent"] = configuredUserAgent;
-    }
+    // The official API interceptor uses its own UA; the client brand/version
+    // in config.headers is reserved for subscription downloads.
+    const authHeaders = {
+      "User-Agent": CFG_USER_AGENT,
+      Accept: "application/json",
+    };
 
-    let lastError;
+    const failures = [];
     for (const baseURL of baseURLs) {
+      let stage = "登录";
       try {
         const authData = await login(baseURL, authHeaders);
-        const { subscribeUrl, token } = await getSubscribe(
+        sensitiveValues.push(authData);
+        stage = "获取订阅地址";
+        const { subscribeUrl, token, uuid } = await getSubscribe(
           baseURL,
           authData,
           authHeaders
         );
+        if (token) sensitiveValues.push(token);
+        subscriptionUuid = uuid;
+        if (uuid) sensitiveValues.push(uuid);
         const candidates = [subscribeUrl];
         if (token) {
           for (const fallbackBaseURL of baseURLs) {
@@ -160,20 +205,21 @@ async function operator(proxies, targetPlatform, context) {
           try {
             const parsed = await fetchAndParse(candidate);
             $substore.write(candidate, subscribeUrlCacheKey);
+            $substore.write(subscriptionUuid, subscribeUuidCacheKey);
             persistSubUserinfo(candidate);
             return parsed;
           } catch (error) {
-            lastError = error;
+            failures.push(
+              `下载订阅 ${requestOrigin(candidate)}: ${errorMessage(error)}`
+            );
           }
         }
       } catch (error) {
-        lastError = error;
+        failures.push(`${stage} ${requestOrigin(baseURL)}: ${errorMessage(error)}`);
       }
     }
     throw new Error(
-      `provider API 订阅获取失败: ${errorMessage(
-        lastError || "无可用订阅地址"
-      )}`
+      `provider API 订阅获取失败: ${unique(failures).join("；") || "无可用订阅地址"}`
     );
   })();
 
@@ -211,6 +257,7 @@ async function operator(proxies, targetPlatform, context) {
 
     return {
       cfgUrls,
+      apex: normalizeApex(value.apex),
       username: normalizeString(value.username),
       password: normalizeString(value.password),
       headers: normalizeHeaders(value.headers),
@@ -254,7 +301,9 @@ async function operator(proxies, targetPlatform, context) {
         try {
           return await fetchConfigHosts(cfgUrl);
         } catch (error) {
-          $substore.error(`provider cfgUrl 获取失败: ${errorMessage(error)}`);
+          $substore.error(
+            `provider cfgUrl ${requestOrigin(cfgUrl)} 获取失败: ${errorMessage(error)}`
+          );
           return [];
         }
       })
@@ -322,19 +371,26 @@ async function operator(proxies, targetPlatform, context) {
     const data = parseJSON(response.body, "getSubscribe 响应")?.data || {};
     const subscribeUrl = normalizeString(data.subscribe_url).trim();
     const token = normalizeString(data.token).trim();
+    const uuid = normalizeString(data.uuid).trim();
     if (!subscribeUrl && !token) {
       throw new Error("getSubscribe 响应缺少 subscribe_url 或 token");
     }
-    return { subscribeUrl, token };
+    return { subscribeUrl, token, uuid };
   }
 
   async function fetchSubscriptionContent(subscribeUrl) {
     const response = await request("get", subscribeUrl, {
       headers: config.headers,
       encoding: null,
+      // Subscription CDN certificates may not cover the advertised hostname.
+      // Match Sub-Store's runtime-specific option without weakening API TLS.
+      ...($substore.env?.isNode ? { strictSSL: false } : { insecure: true }),
     });
     const content = bodyToText(response.body);
     if (!content.trim()) throw new Error("provider API 订阅内容为空");
+    if (/^\s*(?:<!doctype\s+html\b|<html\b)/i.test(content)) {
+      throw new Error("订阅地址返回 HTML 验证页或错误页，未收到节点配置");
+    }
     return content;
   }
 
@@ -387,6 +443,28 @@ async function operator(proxies, targetPlatform, context) {
     return bytesToUtf8(AES_GCM.decrypt(sealed, key, nonce, undefined, 16));
   }
 
+  async function decryptSn2Subscription(body) {
+    const parts = body.trim().split(".");
+    const expiresAt = Number(parts[1]);
+    if (parts.length !== 3 || !/^\d+$/.test(parts[1]) || !Number.isSafeInteger(expiresAt)) {
+      throw new Error("SN2 订阅封装格式无效");
+    }
+    if (Math.floor(Date.now() / 1000) > expiresAt) {
+      throw new Error("SN2 订阅已过期，请重新获取");
+    }
+    if (!subscriptionUuid) {
+      throw new Error("SN2 订阅解密缺少账号 UUID，getSubscribe 未返回 uuid");
+    }
+    // SecurityNet 3.2.1: SHA-256(fixed 32-byte seed || UTF-8(account UUID)),
+    // followed by the same nonce/ciphertext/tag layout as legacy AES-GCM.
+    const seed = /^[0-9a-f]{32}$/.test(config.subscriptionDecrypt?.password)
+      ? config.subscriptionDecrypt.password
+      : "66d570165fad0012ba46077644ac1ba6";
+    return decryptSubscriptionContent(parts[2], {
+      password: `${seed}${subscriptionUuid}`,
+    });
+  }
+
   async function decryptAesBase64(body, decrypt) {
     const key = utf8ToBytes(decrypt.key);
     const iv = utf8ToBytes(decrypt.iv);
@@ -437,14 +515,17 @@ async function operator(proxies, targetPlatform, context) {
     nodeRuntime = null;
     if (!$substore.env?.isNode) return nodeRuntime;
     try {
-      const crypto = globalThis.process?.getBuiltinModule?.("crypto");
+      const loadModule = globalThis.process?.getBuiltinModule
+        ? (name) => globalThis.process.getBuiltinModule(name)
+        : typeof require === "function" ? (name) => require(name) : null;
+      const crypto = loadModule?.("crypto");
       const NodeBuffer = globalThis.Buffer;
       if (
         typeof crypto?.createDecipheriv === "function" &&
         typeof crypto?.createHash === "function" &&
         typeof NodeBuffer?.from === "function"
       ) {
-        nodeRuntime = { crypto, Buffer: NodeBuffer };
+        nodeRuntime = { crypto, Buffer: NodeBuffer, loadModule };
       }
     } catch {
       nodeRuntime = null;
@@ -673,6 +754,7 @@ async function operator(proxies, targetPlatform, context) {
   function buildSubUserinfoUrl(url, headers) {
     return buildUrlArguments(url, headers, {
       providerScriptAutoSubUserinfo: true,
+      insecure: true,
     });
   }
 
@@ -834,7 +916,29 @@ async function operator(proxies, targetPlatform, context) {
   }
 
   function errorMessage(error) {
-    return error?.message ?? String(error);
+    const messages = [];
+    const seen = new Set();
+    for (let current = error; current != null && !seen.has(current); current = current?.cause) {
+      seen.add(current);
+      messages.push(current?.message ?? String(current));
+      if (current?.code) messages.push(String(current.code));
+      if (seen.size >= 4) break;
+    }
+    let message = unique(messages).join(": ");
+    // HTTP runtimes may include the complete request URL in an error. Keep
+    // diagnostics useful without exposing query tokens or login credentials.
+    message = message.replace(/([?&][^=&#\s]+)=([^&#\s]*)/g, "$1=[redacted]");
+    for (const secret of sensitiveValues) {
+      if (!secret) continue;
+      message = message.split(secret).join("[redacted]");
+      message = message.split(encodeURIComponent(secret)).join("[redacted]");
+    }
+    return message;
+  }
+
+  function requestOrigin(url) {
+    return normalizeString(url).match(/^https?:\/\/([^/?#]+)/i)?.[0]
+      .replace(/\/\/[^/@]+@/, "//[redacted]@") || "未知服务";
   }
 }
 
