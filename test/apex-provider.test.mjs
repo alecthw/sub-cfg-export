@@ -51,9 +51,11 @@ function fixture() {
   const config = { cfgUrls: ['https://oss.test/config.json'], headers: { 'User-Agent': 'test.app/v2.4.6' }, username: 'fixture@example.test', password: 'fixture-password', apex }
   return { config, cfg, configBody, subscription, plain, xor }
 }
-async function runFixture(f, { badConfig = false, subscriptionOptions, urlOnly = false, cached = false, configOverride, missingAPI = false } = {}) {
+async function runFixture(f, { badConfig = false, subscriptionOptions, urlOnly = false, cached = false, configOverride, missingAPI = false, flowHeaders = {}, apiFields = {}, storedSub = {}, extraSubs = [] } = {}) {
   const calls = []
   const store = new Map(cached ? [['apex-cache', 'https://sub.test/custom/download?key=private-token&flag=old']] : [])
+  store.set('subs', [{ name: 'apex-local', source: 'local', content: 'fixture', ...storedSub }, ...extraSubs])
+  const operatorContext = { raw: 'fixture', source: { 'apex-local': { source: 'local', content: 'fixture' } } }
   const parseCalls = []
   const httpsMock = {
     request(url, options, callback) {
@@ -62,12 +64,13 @@ async function runFixture(f, { badConfig = false, subscriptionOptions, urlOnly =
       req.end = () => queueMicrotask(() => {
         const res = new EventEmitter()
         res.statusCode = missingAPI && url.hostname === 'api.test' ? 403 : 200
-        res.headers = {}
+        res.headers = ['sub.test', 'backup.test'].includes(url.hostname) ? flowHeaders : {}
         callback(res)
         let body
         if (url.hostname === 'oss.test') body = f.configBody(badConfig)
         else if (url.pathname === '/custom/login') body = JSON.stringify({ data: { auth_data: 'fixture-auth' } })
         else if (url.pathname === '/custom/token') body = JSON.stringify({ data: {
+          ...apiFields,
           ...(urlOnly ? {} : { token: 'private-token' }),
           subscribe_url: 'apex-url-v2:' + b64(f.xor('https://legacy.test/api/v1/client/subscribe?token=private-token')),
         } })
@@ -89,9 +92,9 @@ async function runFixture(f, { badConfig = false, subscriptionOptions, urlOnly =
   vm.runInContext(fs.readFileSync('public/provider-api-subscription.js', 'utf8'), context)
   if (cached) {
     // Cache keys include the complete config; capture it from the first run.
-    context.$substore.read = (k) => k === 'settings' ? {} : k.includes('apex-url:') ? store.get('apex-cache') : store.get(k)
+    context.$substore.read = (k) => k === 'settings' ? {} : k.includes('apex-url:') && !k.endsWith(':userinfo') ? store.get('apex-cache') : store.get(k)
   }
-  return { nodes: await context.operator([], '', { raw: 'fixture' }), calls, store, parseCalls }
+  return { nodes: await context.operator([], '', operatorContext), calls, store, parseCalls, refresh: (source = operatorContext) => context.operator([], '', source) }
 }
 
 test('Apex mapped API, wrapped legacy URL, certificate purposes and APXS authentication', async () => {
@@ -144,6 +147,88 @@ test('Apex requires Node mTLS capabilities and complete purpose-specific bundles
   await assert.rejects(runApexProvider({ config: f.config, runtime: null }), /mTLS/)
 })
 
+test('Apex writes literal flow data and updates it on cached refresh without API login', async () => {
+  const flowHeaders = { 'Subscription-Userinfo': 'upload=12; download=34; total=1000; expire=2100000000' }
+  const result = await runFixture(fixture(), { flowHeaders, apiFields: { u: 1, d: 2, transfer_enable: 3 } })
+  const flow = () => result.store.get('subs')[0].subUserinfo
+  assert.ok(flow().startsWith('upload=12; download=34; total=1000; expire=2100000000;'))
+  assert.equal(JSON.parse(decodeURIComponent(flow().split('#')[1])).providerScriptAutoSubUserinfo, true)
+  assert.ok(!flow().includes('https://'))
+  assert.ok(!flow().includes('private-token'))
+  const count = result.calls.length
+  flowHeaders['Subscription-Userinfo'] = 'upload=56; download=78; total=2000; expire=2200000000'
+  await result.refresh()
+  assert.ok(flow().startsWith('upload=56; download=78; total=2000; expire=2200000000;'))
+  assert.deepEqual(result.calls.slice(count).map((c) => c.url.hostname), ['oss.test', 'sub.test'])
+})
+
+test('Apex falls back to getSubscribe usage and restores the snapshot when a cached response omits it', async () => {
+  const result = await runFixture(fixture(), { apiFields: { u: '0', d: 34, transfer_enable: 1000, expired_at: null, reset_day: 5 } })
+  const flow = result.store.get('subs')[0].subUserinfo
+  assert.ok(flow.startsWith('upload=0; download=34; total=1000; reset_day=5;'))
+  assert.ok(!flow.includes('expire='))
+  delete result.store.get('subs')[0].subUserinfo
+  await result.refresh()
+  assert.equal(result.store.get('subs')[0].subUserinfo, flow)
+})
+
+test('Apex replaces an old generated flow URL and preserves manually configured flow data', async () => {
+  const flowHeaders = { 'subscription-userinfo': 'upload=1; download=2; total=3' }
+  const marker = encodeURIComponent(JSON.stringify({ providerScriptAutoSubUserinfo: true }))
+  const result = await runFixture(fixture(), { flowHeaders, storedSub: { subUserinfo: `https://old.test/subscribe?token=old#${marker}` } })
+  assert.ok(result.store.get('subs')[0].subUserinfo.startsWith('upload=1; download=2; total=3;'))
+  for (const manual of ['https://manual.test/flow', 'upload=8; download=9; total=10']) {
+    result.store.get('subs')[0].subUserinfo = manual
+    await result.refresh()
+    assert.equal(result.store.get('subs')[0].subUserinfo, manual)
+  }
+})
+
+test('Apex does not persist flow data for an unrelated or edited subscription', async () => {
+  const flowHeaders = { 'subscription-userinfo': 'download=2; total=3' }
+  const result = await runFixture(fixture(), {
+    flowHeaders, storedSub: { content: 'edited' },
+    extraSubs: [{ name: 'other', source: 'local', content: 'fixture' }],
+  })
+  assert.equal(result.store.get('subs')[0].subUserinfo, undefined)
+  assert.equal(result.store.get('subs')[1].subUserinfo, undefined)
+})
+
+test('Apex shared refresh persists flow data into each calling local subscription', async () => {
+  const flowHeaders = { 'subscription-userinfo': 'download=2; total=3' }
+  const result = await runFixture(fixture(), {
+    flowHeaders, extraSubs: [{ name: 'other', source: 'local', content: 'fixture' }],
+  })
+  result.store.get('subs')[0].subUserinfo = ''
+  const count = result.calls.length
+  await Promise.all([
+    result.refresh(),
+    result.refresh({ raw: 'fixture', source: { other: { source: 'local', content: 'fixture' } } }),
+  ])
+  for (const sub of result.store.get('subs')) assert.ok(sub.subUserinfo.startsWith('upload=0; download=2; total=3;'))
+  assert.deepEqual(result.calls.slice(count).map((c) => c.url.hostname), ['oss.test', 'sub.test'])
+})
+
+test('Apex keeps existing flow data when a refresh fails authentication', async () => {
+  const options = { tamper: false }
+  const flowHeaders = { 'subscription-userinfo': 'upload=1; download=2; total=3' }
+  const result = await runFixture(fixture(), { flowHeaders, subscriptionOptions: options })
+  const flow = result.store.get('subs')[0].subUserinfo
+  options.tamper = true
+  flowHeaders['subscription-userinfo'] = 'upload=4; download=5; total=6'
+  await assert.rejects(result.refresh(), /签名校验失败/)
+  assert.equal(result.store.get('subs')[0].subUserinfo, flow)
+})
+
+test('Apex rejects invalid flow values instead of writing unusable quota data', async () => {
+  const result = await runFixture(fixture(), {
+    flowHeaders: { 'subscription-userinfo': 'upload=1; download=NaN; total=Infinity' },
+    apiFields: { u: 0, d: 2, transfer_enable: -1 },
+  })
+  assert.equal(result.nodes.length, 1)
+  assert.equal(result.store.get('subs')[0].subUserinfo, undefined)
+})
+
 test('Apex really presents separate client certificates over local TLS', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'apex-mtls-test-'))
   const openssl = (...args) => execFileSync('openssl', args, { cwd: dir, stdio: 'ignore' })
@@ -179,7 +264,7 @@ test('Apex really presents separate client certificates over local TLS', async (
       assert.equal(name, 'https')
       return { request: (url, opts, callback) => https.request(url, { ...opts, ca }, callback) }
     } }
-    const nodes = await runApexProvider({ config: f.config, runtime, timeout: 3000, sensitiveValues: [], errorMessage: (e) => e.message, cacheKey: 'local-tls' })
+    const { nodes } = await runApexProvider({ config: f.config, runtime, timeout: 3000, sensitiveValues: [], errorMessage: (e) => e.message, cacheKey: 'local-tls' })
     assert.equal(nodes.length, 1)
     assert.deepEqual(seen, ['oss', 'api', 'api', 'subscription'])
   } finally {

@@ -166,12 +166,47 @@ export async function runApexProvider({ config, runtime, timeout, proxy, sensiti
       return url.href;
     }))];
   }
-  const download = async (url) => {
+  // Sub-Store's generic flow HTTP client cannot present Apex certificates.
+  // Return a validated literal flow snapshot alongside the authenticated nodes.
+  function normalizeFlow(values) {
+    const numeric = (value) => {
+      if (typeof value !== 'number' && typeof value !== 'string') return null;
+      if (String(value).trim() === '') return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? number : null;
+    };
+    const upload = values.upload == null ? 0 : numeric(values.upload);
+    const download = numeric(values.download);
+    const total = numeric(values.total);
+    if (upload == null || download == null || total == null) return '';
+    const fields = [`upload=${upload}`, `download=${download}`, `total=${total}`];
+    const expire = numeric(values.expire);
+    const resetDay = numeric(values.reset_day);
+    if (expire > 0) fields.push(`expire=${expire}`);
+    if (resetDay != null) fields.push(`reset_day=${resetDay}`);
+    return fields.join('; ');
+  }
+  function responseFlow(headers) {
+    const header = Object.entries(headers || {}).find(([name]) => name.toLowerCase() === 'subscription-userinfo')?.[1];
+    if (typeof header !== 'string') return '';
+    const fields = Object.create(null);
+    for (const part of header.split(';')) {
+      const index = part.indexOf('=');
+      if (index > 0) fields[part.slice(0, index).trim().toLowerCase()] = part.slice(index + 1).trim();
+    }
+    return normalizeFlow(fields);
+  }
+  const flowCacheKey = `${cacheKey}:userinfo`;
+  const download = async (url, apiUserinfo = '') => {
     const response = await request(url, 'subscription');
     const nodes = ProxyUtils.parse(decryptSubscription(response.body));
     if (!Array.isArray(nodes) || !nodes.length) throw new Error('Apex 订阅未解析到有效节点');
+    const cachedFlow = $substore.read(flowCacheKey);
+    const userinfo = responseFlow(response.headers) || apiUserinfo ||
+      (cachedFlow?.url === url ? cachedFlow.userinfo : '') || '';
     $substore.write(url, cacheKey);
-    return nodes;
+    if (userinfo) $substore.write({ url, userinfo }, flowCacheKey);
+    return { nodes, userinfo };
   };
   const cached = $substore.read(cacheKey);
   if (cached) {
@@ -189,9 +224,10 @@ export async function runApexProvider({ config, runtime, timeout, proxy, sensiti
       const sub = JSON.parse(text((await request(apiURL(domain, '/api/v1/user/getSubscribe'), 'api', { auth })).body))?.data;
       if (!sub || (!sub.subscribe_url && !sub.token)) throw new Error('Apex getSubscribe 缺少 subscribe_url/token');
       if (sub.token) sensitiveValues.push(sub.token);
+      const userinfo = normalizeFlow({ upload: sub.u, download: sub.d, total: sub.transfer_enable, expire: sub.expired_at, reset_day: sub.reset_day });
       stage = '下载订阅';
       for (const url of subscriptionURLs(sub.subscribe_url, sub.token)) {
-        try { return await download(url); }
+        try { return await download(url, userinfo); }
         catch (error) { failures.push(`下载订阅 ${httpsURL(url).origin}: ${errorMessage(error)}`); }
       }
     } catch (error) { failures.push(`${stage} ${httpsURL(domain).origin}: ${errorMessage(error)}`); }

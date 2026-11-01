@@ -214,12 +214,55 @@ var ProviderApiSubscription = (function(exports) {
 				return url.href;
 			}))];
 		}
-		const download = async (url) => {
+		function normalizeFlow(values) {
+			const numeric = (value) => {
+				if (typeof value !== "number" && typeof value !== "string") return null;
+				if (String(value).trim() === "") return null;
+				const number = Number(value);
+				return Number.isFinite(number) && number >= 0 ? number : null;
+			};
+			const upload = values.upload == null ? 0 : numeric(values.upload);
+			const download = numeric(values.download);
+			const total = numeric(values.total);
+			if (upload == null || download == null || total == null) return "";
+			const fields = [
+				`upload=${upload}`,
+				`download=${download}`,
+				`total=${total}`
+			];
+			const expire = numeric(values.expire);
+			const resetDay = numeric(values.reset_day);
+			if (expire > 0) fields.push(`expire=${expire}`);
+			if (resetDay != null) fields.push(`reset_day=${resetDay}`);
+			return fields.join("; ");
+		}
+		function responseFlow(headers) {
+			var _Object$entries$find2;
+			const header = (_Object$entries$find2 = Object.entries(headers || {}).find(([name]) => name.toLowerCase() === "subscription-userinfo")) === null || _Object$entries$find2 === void 0 ? void 0 : _Object$entries$find2[1];
+			if (typeof header !== "string") return "";
+			const fields = Object.create(null);
+			for (const part of header.split(";")) {
+				const index = part.indexOf("=");
+				if (index > 0) fields[part.slice(0, index).trim().toLowerCase()] = part.slice(index + 1).trim();
+			}
+			return normalizeFlow(fields);
+		}
+		const flowCacheKey = `${cacheKey}:userinfo`;
+		const download = async (url, apiUserinfo = "") => {
 			const response = await request(url, "subscription");
 			const nodes = ProxyUtils.parse(decryptSubscription(response.body));
 			if (!Array.isArray(nodes) || !nodes.length) throw new Error("Apex 订阅未解析到有效节点");
+			const cachedFlow = $substore.read(flowCacheKey);
+			const userinfo = responseFlow(response.headers) || apiUserinfo || ((cachedFlow === null || cachedFlow === void 0 ? void 0 : cachedFlow.url) === url ? cachedFlow.userinfo : "") || "";
 			$substore.write(url, cacheKey);
-			return nodes;
+			if (userinfo) $substore.write({
+				url,
+				userinfo
+			}, flowCacheKey);
+			return {
+				nodes,
+				userinfo
+			};
 		};
 		const cached = $substore.read(cacheKey);
 		if (cached) try {
@@ -246,9 +289,16 @@ var ProviderApiSubscription = (function(exports) {
 				const sub = (_JSON$parse = JSON.parse(text((await request(apiURL(domain, "/api/v1/user/getSubscribe"), "api", { auth })).body))) === null || _JSON$parse === void 0 ? void 0 : _JSON$parse.data;
 				if (!sub || !sub.subscribe_url && !sub.token) throw new Error("Apex getSubscribe 缺少 subscribe_url/token");
 				if (sub.token) sensitiveValues.push(sub.token);
+				const userinfo = normalizeFlow({
+					upload: sub.u,
+					download: sub.d,
+					total: sub.transfer_enable,
+					expire: sub.expired_at,
+					reset_day: sub.reset_day
+				});
 				stage = "下载订阅";
 				for (const url of subscriptionURLs(sub.subscribe_url, sub.token)) try {
-					return await download(url);
+					return await download(url, userinfo);
 				} catch (error) {
 					failures.push(`下载订阅 ${httpsURL(url).origin}: ${errorMessage(error)}`);
 				}
@@ -2013,25 +2063,28 @@ var ProviderApiSubscription = (function(exports) {
 		const timeout = positiveNumber((_$arguments = $arguments) === null || _$arguments === void 0 ? void 0 : _$arguments.timeout) ? Number($arguments.timeout) : settings.defaultTimeout || 8e3;
 		const proxy = ((_$arguments2 = $arguments) === null || _$arguments2 === void 0 ? void 0 : _$arguments2.proxy) || settings.defaultProxy || ((_globalThis$process = globalThis.process) === null || _globalThis$process === void 0 || (_globalThis$process = _globalThis$process.env) === null || _globalThis$process === void 0 ? void 0 : _globalThis$process.SUB_STORE_BACKEND_DEFAULT_PROXY);
 		if (config.apex) {
-			clearAutoSubUserinfo();
 			const key = Symbol.for("sub-store.provider-api-subscription.refresh-tasks");
 			const tasks = globalThis[key] instanceof Map ? globalThis[key] : globalThis[key] = /* @__PURE__ */ new Map();
 			const refreshKey = `${CACHE_PREFIX}apex-refresh:${configHash}`;
-			if (tasks.has(refreshKey)) return tasks.get(refreshKey);
-			const task = runApexProvider({
-				config,
-				runtime: getNodeRuntime(),
-				timeout,
-				proxy,
-				sensitiveValues,
-				errorMessage,
-				cacheKey: `${CACHE_PREFIX}apex-url:${configHash}`
-			});
-			tasks.set(refreshKey, task);
+			let task = tasks.get(refreshKey);
+			if (!task) {
+				task = runApexProvider({
+					config,
+					runtime: getNodeRuntime(),
+					timeout,
+					proxy,
+					sensitiveValues,
+					errorMessage,
+					cacheKey: `${CACHE_PREFIX}apex-url:${configHash}`
+				});
+				tasks.set(refreshKey, task);
+			}
 			try {
-				return await task;
+				const { nodes, userinfo } = await task;
+				persistApexSubUserinfo(userinfo);
+				return nodes;
 			} finally {
-				tasks.delete(refreshKey);
+				if (tasks.get(refreshKey) === task) tasks.delete(refreshKey);
 			}
 		}
 		const fetchAndParse = async (subscribeUrl) => {
@@ -2491,6 +2544,16 @@ var ProviderApiSubscription = (function(exports) {
 			updateStoredSubscriptions((sub) => {
 				if (sub.subUserinfo && !isAutoSubUserinfo(sub.subUserinfo)) return false;
 				const nextValue = buildSubUserinfoUrl(subscribeUrl, activeSubscriptionHeaders);
+				if (sub.subUserinfo === nextValue) return false;
+				sub.subUserinfo = nextValue;
+				return true;
+			});
+		}
+		function persistApexSubUserinfo(userinfo) {
+			if (!userinfo) return;
+			const nextValue = `${userinfo}; #${encodeURIComponent(JSON.stringify({ providerScriptAutoSubUserinfo: true }))}`;
+			updateStoredSubscriptions((sub) => {
+				if (sub.subUserinfo && !isAutoSubUserinfo(sub.subUserinfo)) return false;
 				if (sub.subUserinfo === nextValue) return false;
 				sub.subUserinfo = nextValue;
 				return true;

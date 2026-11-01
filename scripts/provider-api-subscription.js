@@ -64,15 +64,22 @@ async function operator(proxies, targetPlatform, context) {
     globalThis.process?.env?.SUB_STORE_BACKEND_DEFAULT_PROXY;
 
   if (config.apex) {
-    clearAutoSubUserinfo();
     const key = Symbol.for("sub-store.provider-api-subscription.refresh-tasks");
     const tasks = globalThis[key] instanceof Map ? globalThis[key] : (globalThis[key] = new Map());
     const refreshKey = `${CACHE_PREFIX}apex-refresh:${configHash}`;
-    if (tasks.has(refreshKey)) return tasks.get(refreshKey);
-    const task = runApexProvider({ config, runtime: getNodeRuntime(), timeout, proxy,
-      sensitiveValues, errorMessage, cacheKey: `${CACHE_PREFIX}apex-url:${configHash}` });
-    tasks.set(refreshKey, task);
-    try { return await task; } finally { tasks.delete(refreshKey); }
+    let task = tasks.get(refreshKey);
+    if (!task) {
+      task = runApexProvider({ config, runtime: getNodeRuntime(), timeout, proxy,
+        sensitiveValues, errorMessage, cacheKey: `${CACHE_PREFIX}apex-url:${configHash}` });
+      tasks.set(refreshKey, task);
+    }
+    try {
+      const { nodes, userinfo } = await task;
+      persistApexSubUserinfo(userinfo);
+      return nodes;
+    } finally {
+      if (tasks.get(refreshKey) === task) tasks.delete(refreshKey);
+    }
   }
 
   const fetchAndParse = async (subscribeUrl) => {
@@ -772,6 +779,20 @@ async function operator(proxies, targetPlatform, context) {
     updateStoredSubscriptions((sub) => {
       if (sub.subUserinfo && !isAutoSubUserinfo(sub.subUserinfo)) return false;
       const nextValue = buildSubUserinfoUrl(subscribeUrl, activeSubscriptionHeaders);
+      if (sub.subUserinfo === nextValue) return false;
+      sub.subUserinfo = nextValue;
+      return true;
+    });
+  }
+
+  function persistApexSubUserinfo(userinfo) {
+    if (!userinfo) return;
+    // A separate semicolon-delimited marker reuses legacy auto-ownership
+    // detection; Sub-Store ignores it when normalizing numeric flow headers.
+    const marker = encodeURIComponent(JSON.stringify({ providerScriptAutoSubUserinfo: true }));
+    const nextValue = `${userinfo}; #${marker}`;
+    updateStoredSubscriptions((sub) => {
+      if (sub.subUserinfo && !isAutoSubUserinfo(sub.subUserinfo)) return false;
       if (sub.subUserinfo === nextValue) return false;
       sub.subUserinfo = nextValue;
       return true;

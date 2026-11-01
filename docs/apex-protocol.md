@@ -70,3 +70,13 @@ AES-256-GCM key 直接 Base64 解码为 32 字节，不做 SHA-256 派生。任�
 Globalcloud 的四个配置镜像、登录、getSubscribe 和订阅下载均返回 200，解析出实际节点。安装包导出的 UA 为 `NetFlow/v2.2.4 clash-verge Platform/windows`；此次验证保持提取器输出，未按安装包文件名改写 UA。新旧协议保持兼容，本轮未修改脚本逻辑。
 
 41 项提取器与 provider 回归测试通过；4 项针对当前真实样本的浏览器测试通过（globalcloud 导出、两品牌 Apex 导出及旧协议请求行为）。这里只验证订阅获取和节点配置解析，未逐节点连接测试。
+
+## Apex 流量信息回写修复
+
+原 Apex 分支在进入下载前清理自动流量链接，下载成功后只返回节点，因此本地订阅缺少 `subUserinfo`，Sub-Store 的流量接口无法显示用量。通用流量查询客户端也不携带新版所需的 mTLS 证书，直接回填订阅 URL 无法可靠解决。
+
+修复后，在 APXS 验签、GCM 认证及节点解析均成功后，优先从 `subscription-userinfo` 响应头提取并校验数字字段，回写 Sub-Store 支持的流量字面量。缺少有效响应头时使用 `getSubscribe` 中的 `u`、`d`、`transfer_enable`、`expired_at`、`reset_day`；缓存刷新仍无流量时保留同一 URL 的有效快照。
+
+流量快照末尾以独立分号片段保留原有自动生成标记，Sub-Store 的流量解析器和下载头规范化函数会忽略该片段。旧自动流量 URL 能自动迁移；用户手填链接、手填流量值及已修改内容的其他订阅不会被覆盖。并发共享下载的每个本地订阅分别回写，失败刷新保留原有效流量信息。
+
+回归测试覆盖首次写入、缓存更新、API 数据回退、自动 URL 迁移、手动配置保护、同账号并发订阅及认证失败保护。真实账号验证使用 Sub-Store 源码中的 `getFlowInfo`、`parseFlowHeaders` 和 `normalizeFlowHeader` 检查流量接口和下载头，确认其数值与真实订阅响应一致。
