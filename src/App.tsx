@@ -61,7 +61,7 @@ const AFFILIATE_ADS = [
     promoCode: 'uufly',
     description:
       '全程金融级跨境专线，三网双程优化，节点倍率统一 1 倍，主流地区精耕细作，晚高峰依然低延迟、零丢包。',
-    url: 'https://vip.ytjcok.org/#/register?code=dyGofOZw',
+    url: 'https://super.ytjcok.org/#/register?code=dyGofOZw',
   },
   {
     name: '寰宇云机场',
